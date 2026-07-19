@@ -30,12 +30,14 @@ Be aware of what is actually tested before you install this.
 On macOS, `say.py` and `hub.py` are written to run: the native voice maps to
 `say(1)`, playback falls back to `afplay(1)`, and the console-title lookup
 degrades to empty (session identity comes from `CLAUDE_CODE_SESSION_ID`, which
-is portable). **The orb overlay is Windows-only** — it depends on
-`UpdateLayeredWindow` for real per-pixel alpha, and no equivalent has been
-written yet. Because the overlay is a separate process rather than an import,
-it simply fails to start on macOS and speech continues unaffected.
+is portable). **The orb overlay now has a macOS backend too**: the renderers
+were always pure numpy, so only the surface needed porting — a borderless,
+click-through `NSWindow` whose layer is fed the same premultiplied-BGRA frames
+Windows hands to `UpdateLayeredWindow`. It has never been seen on a screen.
+If the window cannot be created the overlay exits quietly and speech is
+unaffected, because it runs as a separate process rather than an import.
 
-Jumping to a session (`nav.py`) is also Windows-only; on macOS the hub falls
+Jumping to a session (`nav.py`) is still Windows-only; on macOS the hub falls
 back to copying a `claude --resume <id>` command to the clipboard.
 
 The test suite runs on `macos-latest` in CI and passes, so imports, the platform
@@ -163,9 +165,11 @@ The backend chain is first-available-wins, in this order, overridable with `--ba
 
 This is personal tooling being opened up, not a polished product. Specifically:
 
-- **macOS audio is unverified.** CI proves the code imports and the logic holds on
-  Apple silicon, but nobody has actually heard it speak there; the orb overlay and
-  session-jumping remain Windows-only. Treat macOS as a work in progress.
+- **macOS is unverified where it counts.** CI proves the code imports and the pure
+  logic holds on Apple silicon, but nobody has heard it speak or seen the orb on a
+  Mac. The overlay's Cocoa path in particular has never run: if it misbehaves, the
+  likely symptoms are an orb that is mirrored vertically (coordinate conversion) or
+  blurry and oversized (Retina scale). Session-jumping remains Windows-only.
 - **`say.py` is a ~1,600-line monolith.** Every backend, the text preprocessor, the
   preset system and the post-FX chain live in one file. It should be split into a
   `backends/` package with a common interface. Until then, changes there are riskier

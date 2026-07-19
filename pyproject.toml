@@ -34,10 +34,14 @@ dependencies = [
 [project.optional-dependencies]
 # Session-jumping (nav.py) drives Windows Terminal through UI Automation.
 windows = ["uiautomation; sys_platform == 'win32'"]
-# macOS needs nothing extra today: the native voice and playback shell out to
-# say(1) and afplay(1). An extra will appear here when the overlay grows a
-# Cocoa window backend.
-macos = []
+# The orb overlay draws into a Cocoa window (NSWindow + CALayer). Only the two
+# frameworks actually imported, not the `pyobjc` metapackage, which pulls in
+# roughly forty of them. The native voice and playback need nothing extra: they
+# shell out to say(1) and afplay(1).
+macos = [
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",   # AppKit, Foundation
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",  # CGImage, CALayer
+]
 # Local neural backends. Heavy downloads: kokoro ~350MB, f5-tts ~1.3GB.
 local = ["kokoro", "f5-tts"]
 # Second link of the fallback chain. Separate from `local` because it is the
@@ -64,6 +68,7 @@ py-modules = [
     "orb_render",
     "agents_registry",
     "platform_native",
+    "platform_overlay",
 ]
 
 [tool.pytest.ini_options]

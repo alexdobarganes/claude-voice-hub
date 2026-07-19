@@ -34,13 +34,14 @@ import os
 import sys
 import threading
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import platform_native  # noqa: E402
+import platform_overlay  # noqa: E402
 from orb_render import Orb  # noqa: E402
 
 
@@ -88,101 +89,109 @@ CAP_FONT = int(os.environ.get("TTS_CAPTION_FONT", 40))
 CAP_HOLD = 0.55        # seconds a spoken word lingers before it fades away
 HARD_CAP_S = 180.0
 
-user32 = ctypes.windll.user32
-gdi32 = ctypes.windll.gdi32
-kernel32 = ctypes.windll.kernel32
-winmm = ctypes.windll.winmm
-user32.SetProcessDPIAware()
+# The Win32 surface. Guarded because ctypes.windll and ctypes.wintypes do not
+# exist off Windows and would take the whole module down on import -- and this
+# module must stay importable everywhere so the macOS path below can run.
+# On other platforms these names simply do not exist; only Windows code paths
+# reference them.
+if platform_native.IS_WINDOWS:
+    from ctypes import wintypes
 
-LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
-WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT,
-                             wintypes.WPARAM, wintypes.LPARAM)
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    kernel32 = ctypes.windll.kernel32
+    winmm = ctypes.windll.winmm
+    user32.SetProcessDPIAware()
 
-# Declare signatures explicitly. Without this ctypes assumes c_int, which both
-# breaks the WNDPROC callback (LPARAM overflow) and — worse — TRUNCATES 64-bit
-# HWND/HDC/HBITMAP handles to 32 bits, producing handles that silently fail.
-user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
-                                  wintypes.WPARAM, wintypes.LPARAM]
-user32.DefWindowProcW.restype = LRESULT
-user32.CreateWindowExW.argtypes = [
-    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
-    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
-user32.CreateWindowExW.restype = wintypes.HWND
-user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
-                                ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                wintypes.UINT]
-user32.DestroyWindow.argtypes = [wintypes.HWND]
-user32.GetSystemMetrics.argtypes = [ctypes.c_int]
-user32.GetDC.argtypes = [wintypes.HWND]
-user32.GetDC.restype = wintypes.HDC
-user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
-gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
-gdi32.CreateCompatibleDC.restype = wintypes.HDC
-gdi32.CreateDIBSection.restype = wintypes.HBITMAP
-gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
-gdi32.SelectObject.restype = wintypes.HGDIOBJ
-gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
-gdi32.DeleteDC.argtypes = [wintypes.HDC]
-kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT,
+                                 wintypes.WPARAM, wintypes.LPARAM)
 
-WS_POPUP = 0x80000000
-WS_EX_LAYERED = 0x00080000
-WS_EX_TRANSPARENT = 0x00000020
-WS_EX_TOOLWINDOW = 0x00000080
-WS_EX_TOPMOST = 0x00000008
-WS_EX_NOACTIVATE = 0x08000000
-ULW_ALPHA = 0x02
-AC_SRC_OVER, AC_SRC_ALPHA = 0x00, 0x01
-SW_SHOWNOACTIVATE = 4
-HWND_TOPMOST = -1
-SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = 0x0002, 0x0001, 0x0010
+    # Declare signatures explicitly. Without this ctypes assumes c_int, which both
+    # breaks the WNDPROC callback (LPARAM overflow) and — worse — TRUNCATES 64-bit
+    # HWND/HDC/HBITMAP handles to 32 bits, producing handles that silently fail.
+    user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                      wintypes.WPARAM, wintypes.LPARAM]
+    user32.DefWindowProcW.restype = LRESULT
+    user32.CreateWindowExW.argtypes = [
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    wintypes.UINT]
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+    user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    user32.GetDC.argtypes = [wintypes.HWND]
+    user32.GetDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+    gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
-
-class BITMAPINFOHEADER(ctypes.Structure):
-    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
-                ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
-                ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
-                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
-                ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
-                ("biClrImportant", wintypes.DWORD)]
-
-
-class BITMAPINFO(ctypes.Structure):
-    _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+    WS_POPUP = 0x80000000
+    WS_EX_LAYERED = 0x00080000
+    WS_EX_TRANSPARENT = 0x00000020
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_TOPMOST = 0x00000008
+    WS_EX_NOACTIVATE = 0x08000000
+    ULW_ALPHA = 0x02
+    AC_SRC_OVER, AC_SRC_ALPHA = 0x00, 0x01
+    SW_SHOWNOACTIVATE = 4
+    HWND_TOPMOST = -1
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = 0x0002, 0x0001, 0x0010
 
 
-class BLENDFUNCTION(ctypes.Structure):
-    _fields_ = [("BlendOp", ctypes.c_byte), ("BlendFlags", ctypes.c_byte),
-                ("SourceConstantAlpha", ctypes.c_byte), ("AlphaFormat", ctypes.c_byte)]
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
 
 
-class POINT(ctypes.Structure):
-    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
 
 
-class SIZE(ctypes.Structure):
-    _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
+    class BLENDFUNCTION(ctypes.Structure):
+        _fields_ = [("BlendOp", ctypes.c_byte), ("BlendFlags", ctypes.c_byte),
+                    ("SourceConstantAlpha", ctypes.c_byte), ("AlphaFormat", ctypes.c_byte)]
 
 
-user32.UpdateLayeredWindow.argtypes = [
-    wintypes.HWND, wintypes.HDC, ctypes.POINTER(POINT), ctypes.POINTER(SIZE),
-    wintypes.HDC, ctypes.POINTER(POINT), wintypes.COLORREF,
-    ctypes.POINTER(BLENDFUNCTION), wintypes.DWORD]
-user32.UpdateLayeredWindow.restype = wintypes.BOOL
-gdi32.CreateDIBSection.argtypes = [
-    wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT,
-    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
-gdi32.StretchBlt.argtypes = [
-    wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    wintypes.DWORD]
-gdi32.StretchBlt.restype = wintypes.BOOL
-gdi32.SetStretchBltMode.argtypes = [wintypes.HDC, ctypes.c_int]
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
 
-SRCCOPY = 0x00CC0020
+    class SIZE(ctypes.Structure):
+        _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
+
+
+    user32.UpdateLayeredWindow.argtypes = [
+        wintypes.HWND, wintypes.HDC, ctypes.POINTER(POINT), ctypes.POINTER(SIZE),
+        wintypes.HDC, ctypes.POINTER(POINT), wintypes.COLORREF,
+        ctypes.POINTER(BLENDFUNCTION), wintypes.DWORD]
+    user32.UpdateLayeredWindow.restype = wintypes.BOOL
+    gdi32.CreateDIBSection.argtypes = [
+        wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT,
+        ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD]
+    gdi32.StretchBlt.argtypes = [
+        wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.DWORD]
+    gdi32.StretchBlt.restype = wintypes.BOOL
+    gdi32.SetStretchBltMode.argtypes = [wintypes.HDC, ctypes.c_int]
+
+
+    SRCCOPY = 0x00CC0020
 
 
 def screen_luma(x: int, y: int, w: int, h: int) -> float:
@@ -192,7 +201,14 @@ def screen_luma(x: int, y: int, w: int, h: int) -> float:
     for audio before showing: at that moment the grab sees the desktop and not
     our own pixels. Used to decide how much backdrop the visual needs, because
     neon dots on transparency vanish against a white page.
+
+    Windows-only. Elsewhere it reports "mid grey", which makes the visual pick
+    its default backdrop -- the desktop grab is an enhancement, not a
+    requirement, and guessing wrong costs contrast, not correctness.
     """
+    if not platform_native.IS_WINDOWS:
+        screen_luma.last_color = (128.0, 128.0, 128.0)
+        return 0.5
     try:
         sdc = user32.GetDC(None)
         mdc = gdi32.CreateCompatibleDC(sdc)
@@ -239,7 +255,12 @@ def capture_region(x: int, y: int, w: int, h: int) -> np.ndarray | None:
     behind the orb (a video, a scrolling page) refracts as it looked at the
     moment we started speaking. Re-grabbing mid-flight would need the window
     hidden for the grab, which flickers, so a still it is.
+
+    Windows-only; returns None elsewhere, which callers already treat as "no
+    backdrop available" since the grab can fail on Windows too.
     """
+    if not platform_native.IS_WINDOWS:
+        return None
     try:
         sdc = user32.GetDC(None)
         mdc = gdi32.CreateCompatibleDC(sdc)
@@ -547,64 +568,97 @@ def main() -> int:
         return np.ascontiguousarray(np.minimum(blended, 255).astype(np.uint8))
 
     # --- window -------------------------------------------------------------
-    hinst = kernel32.GetModuleHandleW(None)
-    cls = ctypes.create_unicode_buffer("ClaudeSpeakingOrb")
-    wndproc = WNDPROC(lambda h, m, w, l: user32.DefWindowProcW(h, m, w, l))
-
-    class WNDCLASS(ctypes.Structure):
-        _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
-                    ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
-                    ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
-                    ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HBRUSH),
-                    ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
-
-    wc = WNDCLASS()
-    wc.lpfnWndProc = wndproc
-    wc.hInstance = hinst
-    wc.lpszClassName = cls.value
-    user32.RegisterClassW(ctypes.byref(wc))
-
-    sw = user32.GetSystemMetrics(0)
-    sh = user32.GetSystemMetrics(1)
-    # The HD face is a presence, not a status pip: it belongs in the middle of
-    # the screen. The small visuals stay tucked under the top edge.
+    # Three callables abstract the surface for the animation loop below:
+    #   push(frame, alpha)  show a premultiplied-BGRA frame
+    #   pump()              drain the platform's event queue, without blocking
+    #   teardown()          release the surface
+    # The renderers are pure numpy and already portable; only these three touch
+    # the window server, which is why the port lives here and not in the loop.
+    screen = platform_overlay.screen_size()
+    if screen is None and platform_native.IS_WINDOWS:
+        screen = (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+    sw, sh = screen or (1920, 1080)
     x = (sw - W) // 2
-    y = (sh - H) // 2 if visual in ("hd", "scan") else TOP_MARGIN
-    hwnd = user32.CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-        cls.value, cls.value, WS_POPUP & 0xFFFFFFFF, x, y, W, H,
-        None, None, hinst, None)
-    if not hwnd:
-        return 1
+    y = TOP_MARGIN               # tucked under the top edge, like a status pip
 
-    # --- DIB section --------------------------------------------------------
-    screen_dc = user32.GetDC(None)
-    mem_dc = gdi32.CreateCompatibleDC(screen_dc)
-    bmi = BITMAPINFO()
-    bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-    bmi.bmiHeader.biWidth = W
-    bmi.bmiHeader.biHeight = -H          # negative = top-down rows
-    bmi.bmiHeader.biPlanes = 1
-    bmi.bmiHeader.biBitCount = 32
-    bmi.bmiHeader.biCompression = 0      # BI_RGB
-    bits = ctypes.c_void_p()
-    hbmp = gdi32.CreateDIBSection(mem_dc, ctypes.byref(bmi), 0,
-                                  ctypes.byref(bits), None, 0)
-    old = gdi32.SelectObject(mem_dc, hbmp)
-    buf = (ctypes.c_ubyte * (W * H * 4)).from_address(bits.value)
+    if platform_native.IS_WINDOWS:
+        hinst = kernel32.GetModuleHandleW(None)
+        cls = ctypes.create_unicode_buffer("ClaudeSpeakingOrb")
+        wndproc = WNDPROC(lambda h, m, w, l: user32.DefWindowProcW(h, m, w, l))
 
-    user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
-    user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        class WNDCLASS(ctypes.Structure):
+            _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                        ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HBRUSH),
+                        ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
 
-    pt_dst, pt_src, size = POINT(x, y), POINT(0, 0), SIZE(W, H)
+        wc = WNDCLASS()
+        wc.lpfnWndProc = wndproc
+        wc.hInstance = hinst
+        wc.lpszClassName = cls.value
+        user32.RegisterClassW(ctypes.byref(wc))
 
-    def push(frame: np.ndarray, alpha: int) -> None:
-        ctypes.memmove(buf, frame.ctypes.data, frame.nbytes)
-        blend = BLENDFUNCTION(AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA)
-        user32.UpdateLayeredWindow(hwnd, screen_dc, ctypes.byref(pt_dst),
-                                   ctypes.byref(size), mem_dc, ctypes.byref(pt_src),
-                                   0, ctypes.byref(blend), ULW_ALPHA)
+        hwnd = user32.CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            cls.value, cls.value, WS_POPUP & 0xFFFFFFFF, x, y, W, H,
+            None, None, hinst, None)
+        if not hwnd:
+            return 1
+
+        # --- DIB section ----------------------------------------------------
+        screen_dc = user32.GetDC(None)
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bmi = BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = W
+        bmi.bmiHeader.biHeight = -H          # negative = top-down rows
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bmi.bmiHeader.biCompression = 0      # BI_RGB
+        bits = ctypes.c_void_p()
+        hbmp = gdi32.CreateDIBSection(mem_dc, ctypes.byref(bmi), 0,
+                                      ctypes.byref(bits), None, 0)
+        old = gdi32.SelectObject(mem_dc, hbmp)
+        buf = (ctypes.c_ubyte * (W * H * 4)).from_address(bits.value)
+
+        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+
+        pt_dst, pt_src, size = POINT(x, y), POINT(0, 0), SIZE(W, H)
+        msg = wintypes.MSG()
+
+        def push(frame: np.ndarray, alpha: int) -> None:
+            ctypes.memmove(buf, frame.ctypes.data, frame.nbytes)
+            blend = BLENDFUNCTION(AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA)
+            user32.UpdateLayeredWindow(hwnd, screen_dc, ctypes.byref(pt_dst),
+                                       ctypes.byref(size), mem_dc, ctypes.byref(pt_src),
+                                       0, ctypes.byref(blend), ULW_ALPHA)
+
+        def pump() -> None:
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+
+        def teardown() -> None:
+            gdi32.SelectObject(mem_dc, old)
+            gdi32.DeleteObject(hbmp)
+            gdi32.DeleteDC(mem_dc)
+            user32.ReleaseDC(None, screen_dc)
+            user32.DestroyWindow(hwnd)
+    else:
+        window = platform_overlay.create_overlay_window(x, y, W, H, "ClaudeSpeakingOrb")
+        if window is None:
+            # No surface on this platform. Exit quietly with success: the
+            # overlay is decorative, and say.py must not treat a missing visual
+            # as a failure to speak.
+            print(f"[overlay] no overlay surface on {sys.platform}; skipping",
+                  file=sys.stderr)
+            return 0
+        push = window.push
+        pump = window.pump
+        teardown = window.close
 
 
     def audio_bands(now: float) -> np.ndarray:
@@ -628,9 +682,10 @@ def main() -> int:
 
     # --- animation loop -----------------------------------------------------
     # Windows' default timer granularity (~15.6 ms) makes time.sleep overshoot
-    # badly at a 16.7 ms frame budget; ask for 1 ms while we animate.
-    winmm.timeBeginPeriod(1)
-    msg = wintypes.MSG()
+    # badly at a 16.7 ms frame budget; ask for 1 ms while we animate. macOS
+    # sleeps with sub-millisecond granularity already, so it needs no such call.
+    if platform_native.IS_WINDOWS:
+        winmm.timeBeginPeriod(1)
     start = time.monotonic()
     next_frame = start
     fade_out_at: float | None = None
@@ -640,9 +695,7 @@ def main() -> int:
     n_frames = 0
     try:
         while True:
-            while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
+            pump()
 
             now = time.monotonic()
             elapsed = now - start
@@ -730,7 +783,8 @@ def main() -> int:
             elif slack < -0.25:
                 next_frame = time.monotonic()      # fell far behind; resync
     finally:
-        winmm.timeEndPeriod(1)
+        if platform_native.IS_WINDOWS:
+            winmm.timeEndPeriod(1)
         if os.environ.get("TTS_OVERLAY_STATS") == "1":
             # Measure from when the visual actually appeared, not from launch:
             # the wait for audio (and the renderer's warm-up) renders nothing,
@@ -739,11 +793,7 @@ def main() -> int:
             dur = time.monotonic() - t_vis
             print(f"[overlay] {n_frames} frames in {dur:.2f}s visible = "
                   f"{n_frames / max(dur, 1e-6):.1f} fps (target {FPS})", file=sys.stderr)
-        gdi32.SelectObject(mem_dc, old)
-        gdi32.DeleteObject(hbmp)
-        gdi32.DeleteDC(mem_dc)
-        user32.ReleaseDC(None, screen_dc)
-        user32.DestroyWindow(hwnd)
+        teardown()
     return 0
 
 
