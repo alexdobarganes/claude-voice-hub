@@ -70,15 +70,20 @@ def test_wt_tab_select_skips_empty_title():
     assert nav._select_wt_tab(123, "") is False
 
 
+# describe() delegates to os.path.basename, which is platform-native: "\" is a
+# separator on Windows and an ordinary filename character on POSIX. Building the
+# fixtures with os.path.join keeps the assertion about describe(), not about
+# which OS is running the test.
 def test_describe_uses_registry(monkeypatch):
     monkeypatch.setattr(agents_registry, "lookup",
-                        lambda sid: {"name": "voice hub", "cwd": "D:\\proj\\example-app"})
+                        lambda sid: {"name": "voice hub",
+                                     "cwd": os.path.join("proj", "example-app")})
     assert agents_registry.describe("x") == ("voice hub", "example-app")
 
 
 def test_describe_falls_back_to_cwd(monkeypatch):
     monkeypatch.setattr(agents_registry, "lookup", lambda sid: None)
-    assert agents_registry.describe("x", "D:\\proj\\other") == ("", "other")
+    assert agents_registry.describe("x", os.path.join("proj", "other")) == ("", "other")
 
 
 def test_registry_survives_broken_cli(monkeypatch):
