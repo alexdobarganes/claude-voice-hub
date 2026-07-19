@@ -29,6 +29,15 @@ SILENCE_RMS = 35.0
 _NOT_A_MIC = ("voicemeeter", "cable", "virtual", "stereo mix", "line in",
               "sound mapper", "primary sound", "wave", "aux", "analogue")
 
+# Host APIs to use only as a last resort. Windows exposes the same physical mic
+# through several of them, and WDM-KS is the raw kernel-streaming path: measured
+# here, one webcam mic reads a noise floor of ~834 through WDM-KS and ~22
+# through MME. Since the device is chosen by which one hears most, WDM-KS won
+# every time and took the noise with it -- the calibrated threshold landed at
+# 2501, above ordinary speech, and questions went unanswered while they were
+# being answered. It also rejects blocking reads outright.
+_LAST_RESORT_HOSTS = ("windows wdm-ks",)
+
 
 def _load_dotenv() -> None:
     envf = THIS_DIR / ".env"
@@ -81,6 +90,11 @@ def pick_input_device(force: bool = False) -> int | None:
     probe the real microphones and take the one that actually hears the room.
     Set TTS_STT_DEVICE to pin a device and skip probing.
 
+    "Hears most" is only a sound rule among comparable devices. Windows exposes
+    one physical mic through several host APIs, and the noisiest of those wins a
+    loudness contest purely by being noisier, not by hearing better. So
+    last-resort host APIs are considered only when nothing else responds.
+
     The result is cached: probing costs ~0.35s per candidate, and paying that
     on every dictation would swallow the first words spoken after the hotkey.
     """
@@ -90,6 +104,23 @@ def pick_input_device(force: bool = False) -> int | None:
         return int(override)
     if _picked and not force:
         return _picked_device
+    best = _probe_best(preferred=True)
+    if best is None:
+        best = _probe_best(preferred=False)
+    _picked_device, _picked = best, True
+    return best
+
+
+def _host_api_name(dev: dict) -> str:
+    import sounddevice as sd
+    try:
+        return (sd.query_hostapis()[dev.get("hostapi", -1)]["name"] or "").lower()
+    except Exception:
+        return ""
+
+
+def _probe_best(preferred: bool) -> int | None:
+    """Loudest responding mic, restricted to (or excluding) preferred hosts."""
     best, best_level = None, 0.0
     for idx, dev in enumerate(_query_devices()):
         if dev.get("max_input_channels", 0) <= 0:
@@ -97,10 +128,12 @@ def pick_input_device(force: bool = False) -> int | None:
         name = (dev.get("name") or "").lower()
         if any(bad in name for bad in _NOT_A_MIC):
             continue
+        last_resort = any(h in _host_api_name(dev) for h in _LAST_RESORT_HOSTS)
+        if last_resort == preferred:
+            continue
         level = _probe_level(idx)
         if level > best_level:
             best, best_level = idx, level
-    _picked_device, _picked = best, True
     return best
 
 
@@ -185,10 +218,19 @@ class Endpointer:
 
     def __init__(self, timeout: float = 20.0, silence_tail: float = 1.4,
                  calibrate_s: float = 0.8, max_total: float = 60.0,
-                 min_speech_s: float = 0.25, block_s: float = 0.05) -> None:
+                 min_speech_s: float = 0.25, block_s: float = 0.05,
+                 settle_s: float = 0.5) -> None:
         self.timeout = timeout
         self.silence_tail = silence_tail
-        self.calibrate_s = calibrate_s
+        # Throw the opening away before measuring anything. Two things
+        # contaminate it, and both inflate the floor: the tail of the question
+        # we just spoke still decaying in the room, and the mic's automatic
+        # gain ramping up from cold. Measured here, that window reads a median
+        # of ~718 against a true floor of ~22 -- calibrating on it set a
+        # threshold of 2068, which is above normal speech, so the session sat
+        # there deaf while it was being answered.
+        self.settle_s = settle_s
+        self.calibrate_s = settle_s + calibrate_s
         self.max_total = max_total
         # The run has to be *consecutive*. Counting blocks cumulatively was the
         # bug that let an empty room answer a question: over twenty seconds a
@@ -225,6 +267,8 @@ class Endpointer:
 
     def feed(self, rms: float, elapsed: float) -> str:
         """Return 'calibrating' | 'listening' | 'speech' | 'done' | 'timeout'."""
+        if elapsed < self.settle_s:
+            return "calibrating"   # measured but discarded: see settle_s
         if elapsed < self.calibrate_s:
             self._floor_samples.append(rms)
             return "calibrating"

@@ -12,7 +12,12 @@ LOUD = 900.0      # someone talking
 
 
 def _run(levels, dt=0.05, **kw):
-    """Feed a sequence of block levels and return the states produced."""
+    """Feed a sequence of block levels and return the states produced.
+
+    settle_s defaults to 0 here so these cases exercise endpointing rather than
+    the discarded opening window; the settle itself is tested on its own below.
+    """
+    kw.setdefault("settle_s", 0.0)
     ep = stt.Endpointer(**kw)
     return ep, [ep.feed(rms, i * dt) for i, rms in enumerate(levels)]
 
@@ -95,6 +100,30 @@ def test_sustained_speech_clears_the_minimum():
     levels = [QUIET] * 8 + [LOUD] * 12 + [QUIET] * 40
     ep, _ = _run(levels, calibrate_s=0.2, silence_tail=1.0, min_speech_s=0.35)
     assert ep.heard_speech
+
+
+def test_the_contaminated_opening_never_reaches_the_floor():
+    """The question we just spoke is still decaying in the room and the mic's
+    AGC is ramping. Measured here that window reads a median of ~718 against a
+    true floor of ~22; calibrating on it produced a threshold of 2068, above
+    normal speech, so the session sat deaf while it was being answered."""
+    tts_tail = [718.0] * 10          # 0.5 s of our own voice + AGC ramp
+    quiet_room = [22.0] * 16         # the actual floor, once things settle
+    ep, _ = _run(tts_tail + quiet_room + [900.0] * 10,
+                 settle_s=0.5, calibrate_s=0.8, silence_tail=1.0)
+    assert ep.floor is not None and ep.floor < 100
+    assert ep.threshold < 900        # i.e. it can still hear a person
+    assert ep.heard_speech
+
+
+def test_without_the_settle_the_same_room_goes_deaf():
+    """Pins the failure the settle exists to prevent."""
+    tts_tail = [718.0] * 10
+    quiet_room = [22.0] * 16
+    ep, _ = _run(tts_tail + quiet_room + [900.0] * 10,
+                 settle_s=0.0, calibrate_s=0.8, silence_tail=1.0)
+    assert ep.threshold > 900
+    assert not ep.heard_speech
 
 
 def test_a_very_long_answer_is_capped():
