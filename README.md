@@ -135,6 +135,15 @@ The mic opens only after an explicit `--ask`, and closes on trailing silence or
 timeout (`--ask-timeout`, `--ask-tail`). If the wrong input gets picked, pin it
 with `TTS_STT_DEVICE`.
 
+One Windows trap is worth knowing about, because it cost the most here and it
+is invisible: the same physical microphone appears once per host API. The C270
+on this machine reads a noise floor of ~22 through MME and ~834 through
+WDM-KS. Since the device was chosen by which one heard most, the noisy driver
+won every time, and the threshold calibrated from it landed above ordinary
+speech — the session sat there deaf while it was being answered out loud.
+WDM-KS is now a last resort. If `--ask` cannot hear you, check which host API
+you are on before assuming the mic is at fault.
+
 ### Priority
 
 Utterances are ranked, not merely queued:
