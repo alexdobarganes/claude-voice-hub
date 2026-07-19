@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Callable
 
 import platform_native
+import turn
 
 warnings.filterwarnings("ignore")
 
@@ -719,44 +720,48 @@ class _HubReporter:
 
 # ----------------------------- helpers -------------------------------------
 
-def acquire_speech_lock(timeout: float = 120.0, stale: float = 180.0) -> Callable[[], None]:
-    """Serialize playback across concurrent say.py processes.
+# ----------------------------- asking --------------------------------------
+# Playback serialization now lives in turn.py, which ranks utterances instead of
+# handing the queue to whichever process happened to call os.open first.
 
-    Multiple Claude sessions can speak at the same time; without this their
-    audio overlaps into noise. A lock file in the temp dir makes playback
-    first-come-first-served: later callers wait until the current utterance
-    finishes, so voices queue instead of talking over each other.
+ASK_NO_ANSWER = 3
 
-    Never blocks forever and never goes silent: a lock older than `stale`
-    seconds is treated as a crashed process and removed; on `timeout` we
-    proceed without the lock. Returns a release() callable.
+
+def listen_for_answer(hub: "_HubReporter", overlay, args) -> int:
+    """Capture a spoken answer and print the transcript to stdout.
+
+    That stdout is the return value of the Bash call the agent made, which is
+    the entire point of --ask: the answer comes back as tool output and the
+    session continues without anyone walking to a keyboard.
+
+    The caller still holds its turn while this runs, so no other session can
+    start talking over the answer. Returns an exit code: 0 with a transcript on
+    stdout, ASK_NO_ANSWER if nobody answered. Silence is never smoothed over
+    into a plausible answer — a session that asked needs to learn it was not
+    answered, and Scribe will happily invent a caption for an empty room.
     """
-    lock_path = Path(tempfile.gettempdir()) / "say-voice.lock"
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-
-            def release() -> None:
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
-
-            return release
-        except FileExistsError:
-            try:
-                if time.time() - lock_path.stat().st_mtime > stale:
-                    lock_path.unlink()
-                    continue
-            except OSError:
-                continue  # holder just released; retry immediately
-            if time.monotonic() >= deadline:
-                print("[lock] timeout waiting for speech lock; playing anyway", file=sys.stderr)
-                return lambda: None
-            time.sleep(0.3)
+    overlay.stop()  # speaking is over; what is live now is the microphone
+    hub.emit("listening")
+    try:
+        import stt
+        answer = stt.listen_once(timeout=args.ask_timeout,
+                                 silence_tail=args.ask_tail).strip()
+    except Exception as e:
+        print(f"[ask] no answer: {e}", file=sys.stderr)
+        return ASK_NO_ANSWER
+    if not answer:
+        print("[ask] no answer: empty transcript", file=sys.stderr)
+        return ASK_NO_ANSWER
+    # Force UTF-8 on the way out. Windows hands stdout a cp1252 codec by
+    # default, which turned a real answer into 'mant?n ... olv?date': the
+    # agent would act on a mangled version of what was actually said, and
+    # Spanish answers carry accents in almost every sentence.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    print(answer)
+    return 0
 
 
 def parse_headers(text: str) -> tuple[str, str | None, str | None]:
@@ -1495,7 +1500,30 @@ def main() -> int:
                         "Also settable with TTS_VOICE_VISUAL")
     p.add_argument("--no-overlay", action="store_true",
                    help="don't show the on-screen speaking indicator")
+    # --ask turns the loudspeaker into a conversation: speak a question, listen
+    # hands-free, and print the transcript to stdout. The agent that ran this
+    # through Bash receives the spoken answer as its tool output and carries on,
+    # so answering no longer costs a trip to the keyboard.
+    p.add_argument("--ask", action="store_true",
+                   help="after speaking, listen for a spoken answer and print the "
+                        "transcript to stdout (exit 3 if nobody answered)")
+    p.add_argument("--ask-timeout", type=float, default=20.0,
+                   help="seconds to wait for an answer to begin (default 20)")
+    p.add_argument("--ask-tail", type=float, default=1.4,
+                   help="seconds of silence that end the answer (default 1.4)")
+    p.add_argument("--priority", default=None,
+                   choices=tuple(turn.PRIORITIES),
+                   help="how far this utterance jumps the queue: blocker > "
+                        "question > outcome > ping. --ask implies question")
     args = p.parse_args()
+
+    # Without playback we never reach the listening step, so --ask would exit 0
+    # having asked nobody anything. Failing loudly beats an agent believing it
+    # got an answer it never waited for.
+    if args.ask and args.no_play:
+        print("--ask needs playback: it speaks a question and then listens",
+              file=sys.stderr)
+        return 1
 
     if args.seed_ref:
         out = seed_jorge_ref()
@@ -1540,6 +1568,11 @@ def main() -> int:
                        overlay_label, args.preset or hdr_preset or DEFAULT_PRESET,
                        raw_text)
 
+    # A question outranks a plain outcome by default: it is the one kind of
+    # utterance that leaves a session blocked until it is answered.
+    priority = args.priority or ("question" if args.ask else turn.DEFAULT_PRIORITY)
+    turn.clear_legacy_lock()
+
     preset = resolve_preset(args.preset or hdr_preset)
     voice = args.voice or (preset.voice_es if lang == "es" else preset.voice_en)
     # rate priority: explicit --edge-rate > preset + delta from --rate
@@ -1556,19 +1589,21 @@ def main() -> int:
         print(f"[say] streaming via elevenlabs preset={preset.name} voice={voice} lang={lang}",
               file=sys.stderr)
         hub.emit("queued")
-        release = acquire_speech_lock()
+        speech_turn = turn.acquire(priority)
         hub.emit("speaking")
         overlay = _NullOverlay() if args.no_overlay else start_overlay(overlay_label, args.visual)
         try:
             if stream_elevenlabs(text, preset=preset.name, voice=args.voice,
                                  device=args.device, overlay=overlay):
-                return 0
+                # The turn is still held here, so the mic opens before anyone
+                # else can start talking over the answer.
+                return listen_for_answer(hub, overlay, args) if args.ask else 0
             print("[say] stream produced no audio; falling back to synth", file=sys.stderr)
         except Exception as e:
             print(f"[say] stream failed: {e}; falling back to synth", file=sys.stderr)
         finally:
             overlay.stop()
-            release()
+            speech_turn.release()
             hub.emit("done")
 
     # Start the visual BEFORE synthesizing. It stays invisible until the first
@@ -1635,7 +1670,7 @@ def main() -> int:
         # stalling the queue while we crunch numbers.
         analysis = None if args.no_overlay else analyze_audio(final_path)
         hub.emit("queued")
-        release = acquire_speech_lock()
+        speech_turn = turn.acquire(priority)
         hub.emit("speaking")
         try:
             def on_start(latency: float) -> None:
@@ -1648,9 +1683,11 @@ def main() -> int:
                 overlay.send_words(getattr(backend, "words", None), delay=latency)
 
             play_audio(final_path, device=args.device, on_start=on_start)
+            if args.ask:
+                return listen_for_answer(hub, overlay, args)
         finally:
             overlay.stop()
-            release()
+            speech_turn.release()
             hub.emit("done")
     return 0
 

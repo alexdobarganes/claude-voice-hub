@@ -100,6 +100,60 @@ python say.py --list-presets
 python say.py --no-play --out clip.wav "Generate a file, do not play it."
 ```
 
+### Asking
+
+`--ask` turns the loudspeaker into a conversation: the session speaks a question,
+listens hands-free, and prints what you said to stdout.
+
+```bash
+python say.py --ask "Billing api: ¿mergeo a main o abro PR?"
+# speaks it, opens the mic, and prints:
+#   abre PR
+```
+
+The agent ran that through Bash, so **your spoken answer arrives as its tool
+output** and it carries on. Answering costs nothing but talking: no tab to find,
+nothing to paste.
+
+Exit codes are the contract, and the case that matters is the second one:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | An answer was captured; it is on stdout |
+| 3 | Nobody answered — timeout, silence, or transcription failed |
+
+There is no third outcome where an unanswered question returns a plausible
+answer. That is not a theoretical concern: the first end-to-end run of this
+returned a fluent English sentence to a question asked in Spanish, in an empty
+room, because a fan and a webcam mic were enough for a hosted model to invent
+one. What rejects it now is that a capture must contain a *consecutive* run of
+speech (0.25 s) above a floor calibrated from the room itself. Counting loud
+blocks cumulatively is not enough: over twenty seconds a noisy room reaches any
+cumulative total.
+
+The mic opens only after an explicit `--ask`, and closes on trailing silence or
+timeout (`--ask-timeout`, `--ask-tail`). If the wrong input gets picked, pin it
+with `TTS_STT_DEVICE`.
+
+### Priority
+
+Utterances are ranked, not merely queued:
+
+```bash
+python say.py --priority blocker "Prod is down."
+python say.py --priority ping "Still refactoring."
+```
+
+`blocker` > `question` > `outcome` > `ping` (default `outcome`; `--ask` implies
+`question`). A blocker overtakes pings that queued before it. Within a band,
+order is exact arrival — the old lock was a spin loop over `O_EXCL`, so among
+several waiters an arbitrary one won and the hub's visible queue could disagree
+with what actually played.
+
+A turn already in progress is never preempted. You cannot un-play audio that is
+already leaving the speaker, so a blocker goes to the front of the queue, not to
+the front of the sound card.
+
 Presets (`neutral`, `excited`, `calm`, `dramatic`, `news`, `brief`) bundle voice, rate
 and pitch so changing the delivery is one flag. Text is preprocessed before synthesis:
 tickers, currency, percentages, large numbers and common abbreviations are rewritten so
@@ -143,7 +197,8 @@ human-readable name and project by wrapping `claude agents --json`.
 
 ## Architecture
 
-`say.py` synthesizes and plays audio, holding a lock so concurrent invocations queue.
+`say.py` synthesizes and plays audio, taking a turn from `turn.py` so concurrent
+invocations queue in rank order rather than overlapping.
 As it works it writes JSON events (queued / speaking / done) to a spool directory that
 `hub.py` tails: the two processes never talk directly, which is why the hub can die,
 restart, or be absent without breaking speech. `hub.py` is a tkinter always-on-top
@@ -175,8 +230,14 @@ This is personal tooling being opened up, not a polished product. Specifically:
   preset system and the post-FX chain live in one file. It should be split into a
   `backends/` package with a common interface. Until then, changes there are riskier
   than they should be.
-- **No test coverage on `say.py` or `overlay.py`.** The 43 tests cover the event spool,
-  navigation, sound events and STT. The largest and most-used modules are untested.
+- **Thin test coverage on `say.py` and `overlay.py`.** The suite covers the event
+  spool, navigation, sound events, STT, turn ordering, endpointing and the
+  `--ask` exit-code contract. Synthesis, playback and the renderers are still
+  untested, which is most of `say.py` by volume.
+- **`--ask` is tuned against one room.** The endpointer's floor calibration and
+  its 0.25 s speech minimum were set from measurements on a single machine with
+  a webcam mic. They reject that room reliably; whether they reject yours, or
+  clip your short answers, is unverified.
 - **ffmpeg is a hard system dependency**, not installable via pip.
 - Linux is not supported and nothing has been done to make it work.
 
