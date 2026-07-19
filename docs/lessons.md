@@ -95,6 +95,40 @@ scattered at random read as noise, no matter how correct their density is.
 Neither of these was visible from summary statistics. They became obvious only
 by zooming into the reference and comparing patches side by side.
 
+## A bigger model was not a better model
+
+Wake-word detection was missing real addresses, so the obvious lever was a
+larger local recogniser. Measured on the same 29-phrase corpus, same audio,
+same GPU:
+
+| model | correct | misses | false wakes | load | per phrase |
+| --- | --- | --- | --- | --- | --- |
+| small | 28/29 | 1 | 0 | 7.2 s | 0.42 s |
+| medium | 28/29 | 1 | 0 | 17.6 s | 0.78 s |
+
+Identical accuracy for roughly double the cost on both axes. The failures were
+not the kind more model capacity fixes: they were phrases where the address ran
+into the name and came out as one token ("Vale Claude" → "Valachlod"), which is
+a word-boundary problem, not a recognition-quality one.
+
+Worth stating because the reflex is to reach for the bigger model first. Here
+it would have doubled latency in a loop that runs on every utterance in the
+room, in exchange for nothing.
+
+Two related findings from the same measurements:
+
+- **The benchmark is noisy, because the audio is generated.** Synthesis is not
+  deterministic, so the same phrase produces different audio between runs and
+  the failing case moved: one run could not hear "Hey Claude, abre el PR" (it
+  transcribed as Arabic), the next run heard it fine and failed on "Vale
+  Claude, sigue" instead. A single run of a corpus like this is a sample, not a
+  score. Only the aggregate and the direction of change are worth reading.
+- **Check what the hardware refuses before concluding it is absent.** The
+  loader asked for `float16`, the card said no, and the code took that as "no
+  usable GPU" and went to the CPU. The card was a 1080 Ti: no efficient fp16,
+  but perfectly good `int8`. That one unchecked assumption cost 4.17 s per
+  utterance instead of 0.44 s, for byte-identical output.
+
 ## Two smaller ones
 
 - **Isolate a subject by where marks exist, not by how bright they are.** Using a

@@ -8,6 +8,13 @@ is where every wake-word bug so far has actually lived.
 `True` means the assistant must treat it as addressed to it. `False` means it
 must ignore it, and those matter more: a missed wake costs Alex repeating
 himself, while a false wake delivers something he never said into a session.
+
+**One run is a sample, not a score.** The audio is synthesized fresh each time
+and synthesis is not deterministic, so the same phrase yields different audio
+between runs and the failing case moves: one run could not hear "Hey Claude,
+abre el PR" at all (it transcribed as Arabic), the next heard it fine and
+failed on "Vale Claude, sigue" instead. Read the aggregate and the direction of
+change, and do not tune against a single miss.
 """
 
 # --------------------------- must wake --------------------------------------

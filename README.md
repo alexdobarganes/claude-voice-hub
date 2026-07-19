@@ -151,8 +151,17 @@ happens to be asking and nobody is listening.
 
 ```bash
 python assistant.py              # owns the mic, listens for its name
+python assistant.py --status     # is it listening? what is queued? what is stuck?
 python assistant.py --self-test  # verify the whole path without a mic
 ```
+
+It is not started for you, and that is deliberate: `say.py` auto-launches the
+hub, but a hub is a panel and this is a microphone. Turning one on should be
+something you did, not something that happened.
+
+`--status` exists because the failure mode here is silence, and an assistant
+that is not running looks exactly like one that is running and ignoring you.
+Both are quiet.
 
 Say **"Claude, ..."** and what follows is delivered to a session. Name a session
 and it goes there specifically ("Claude, billing api, abre el PR"). While a
@@ -181,9 +190,22 @@ back as "Oje Claude" and then as "Ojeh, Claude". Grow that list from what you
 observe, not from what should happen; `--self-test` is there to make observing
 cheap.
 
+**Where what you say ends up.** A session sitting in `--ask` claims its answer
+within a poll. Anything else waits 8 s for a session to collect it and then
+falls back to the clipboard with the app focused — the same conclusion `nav.py`
+already reached for dictation, because typing blind into the desktop app would
+land in whichever session happens to be open. So unprompted speech stops one
+paste short of hands-free, on purpose.
+
 **It cannot tell one voice from another.** Someone else in the room saying
 "Claude" reaches your sessions. Treat what arrives as something to confirm
 before acting on, not as proof of consent.
+
+**Speed.** The local pass runs on the GPU where there is one, falling back
+`cuda/float16 → cuda/int8 → cpu/int8`. The middle step matters more than it
+looks: Pascal cards have no efficient fp16 and reject it outright, and reading
+that rejection as "no usable GPU" cost 4.17 s per utterance instead of 0.44 s,
+for identical output.
 
 ### Priority
 

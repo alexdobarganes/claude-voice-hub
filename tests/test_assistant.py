@@ -157,3 +157,50 @@ def test_escalation_of_an_empty_inbox_does_nothing(tmp_path, monkeypatch):
     import inbox as ibx
     monkeypatch.setattr(ibx, "INBOX_DIR", tmp_path / "inbox")
     assert assistant.escalate_unclaimed(grace_s=0.0) == 0
+
+
+# --------------------------- backend selection ------------------------------
+
+def _fake_whisper(monkeypatch, works):
+    """Install a WhisperModel that only accepts the (device, compute) in works."""
+    import sys, types
+    tried = []
+
+    class FakeModel:
+        def __init__(self, name, device=None, compute_type=None):
+            tried.append((device, compute_type))
+            if (device, compute_type) not in works:
+                raise ValueError(f"Requested {compute_type} compute type, but "
+                                 "the target device does not support it")
+    monkeypatch.setitem(sys.modules, "faster_whisper",
+                        types.SimpleNamespace(WhisperModel=FakeModel))
+    return tried
+
+
+def test_a_card_without_fp16_still_uses_the_gpu(monkeypatch):
+    """The bug this pins: a Pascal card rejects float16, and that rejection was
+    read as 'no usable GPU'. Measured cost of that mistake: 4.17 s per utterance
+    instead of 0.44 s, for identical output."""
+    tried = _fake_whisper(monkeypatch, {("cuda", "int8")})
+    lt = assistant.LocalTranscriber("small")
+    lt.load()
+    assert ("cuda", "int8") in tried
+    assert ("cpu", "int8") not in tried   # never got that far
+
+
+def test_a_machine_with_no_gpu_falls_all_the_way_to_cpu(monkeypatch):
+    tried = _fake_whisper(monkeypatch, {("cpu", "int8")})
+    assistant.LocalTranscriber("small").load()
+    assert tried[-1] == ("cpu", "int8")
+
+
+def test_fp16_is_preferred_where_it_works(monkeypatch):
+    tried = _fake_whisper(monkeypatch, {("cuda", "float16"), ("cuda", "int8")})
+    assistant.LocalTranscriber("small").load()
+    assert tried == [("cuda", "float16")]
+
+
+def test_no_usable_backend_is_an_error_not_a_silent_pass(monkeypatch):
+    _fake_whisper(monkeypatch, set())
+    with pytest.raises(RuntimeError):
+        assistant.LocalTranscriber("small").load()

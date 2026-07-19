@@ -123,18 +123,29 @@ class LocalTranscriber:
         self.model_name = model_name
         self._model = None
 
+    # Tried in order, first that loads wins. float16 is fastest where it exists,
+    # but Pascal cards (a 1080 Ti here) have no efficient fp16 and reject it --
+    # and the original code took that rejection as "no usable GPU" and fell all
+    # the way to the CPU. Measured on the same clip: 4.17 s on CPU int8 against
+    # 0.44 s on CUDA int8, for identical output. Nine times slower, for a
+    # capability the machine had all along.
+    BACKENDS = (("cuda", "float16"), ("cuda", "int8"), ("cpu", "int8"))
+
     def load(self) -> None:
         if self._model is not None:
             return
         from faster_whisper import WhisperModel
-        try:
-            self._model = WhisperModel(self.model_name, device="cuda",
-                                       compute_type="float16")
-            log(f"local model {self.model_name} on cuda")
-        except Exception as e:
-            log(f"cuda unavailable ({e}); falling back to cpu")
-            self._model = WhisperModel(self.model_name, device="cpu",
-                                       compute_type="int8")
+        last: Exception | None = None
+        for device, compute in self.BACKENDS:
+            try:
+                self._model = WhisperModel(self.model_name, device=device,
+                                           compute_type=compute)
+                log(f"local model {self.model_name} on {device}/{compute}")
+                return
+            except Exception as e:
+                last = e
+                log(f"{device}/{compute} unavailable: {str(e)[:80]}")
+        raise RuntimeError(f"no usable backend for {self.model_name}: {last}")
 
     def transcribe(self, wav_path: Path) -> str:
         """Transcribe, with the model's own VAD doing the first rejection.
@@ -391,9 +402,66 @@ def self_test(cases: "list[tuple[str, bool]] | None" = None,
     return 1 if bad else 0
 
 
+def status() -> int:
+    """Print what the voice channel is currently doing. Diagnostic, not UI.
+
+    The failure mode this exists for is silence: an assistant that is not
+    running looks exactly like one that is running and ignoring you. Both are
+    quiet. So the first question anyone asks -- 'is it even listening?' --
+    should not require reading a log file to answer.
+    """
+    running = is_running()
+    print(f"assistant : {'listening' if running else 'NOT RUNNING'}")
+    if running:
+        try:
+            print(f"            pid {ASSISTANT_LOCK.read_text().strip()}")
+        except Exception:
+            pass
+    else:
+        print("            start it with:  python assistant.py")
+
+    try:
+        import stt
+        import sounddevice as sd
+        dev = stt.pick_input_device()
+        if dev is None:
+            print("mic       : none found")
+        else:
+            d = sd.query_devices()[dev]
+            host = sd.query_hostapis()[d["hostapi"]]["name"]
+            print(f"mic       : [{dev}] {d['name']}  ({host})")
+    except Exception as e:
+        print(f"mic       : unavailable ({type(e).__name__})")
+
+    print(f"speaking  : {'yes' if turn.is_speaking() else 'no'}")
+    waiting = turn.pending()
+    print(f"queue     : {len(waiting)} waiting"
+          + (f"  ({', '.join(w.get('priority', '?') for w in waiting)})"
+             if waiting else ""))
+
+    questions = inbox.open_questions()
+    print(f"asking    : {len(questions)} session(s) waiting on you")
+    for q in questions:
+        print(f"            {q.get('tag') or q.get('session_id', '?')[:8]}")
+
+    pending_msgs = inbox.peek()
+    print(f"inbox     : {len(pending_msgs)} undelivered")
+    for m in pending_msgs:
+        print(f"            -> {m.get('target')}: {(m.get('text') or '')[:50]}")
+
+    try:
+        lines = LOG.read_text(encoding="utf-8").splitlines()[-5:]
+        print("log       : " + ("\n            ".join(lines) if lines else "(empty)"))
+    except Exception:
+        print("log       : (none yet)")
+    return 0
+
+
 def main() -> int:
     if "--self-test" in sys.argv:
         return self_test()
+    if "--status" in sys.argv:
+        return status()
     if not _take_lock():
         print("assistant already running", file=sys.stderr)
         return 0
