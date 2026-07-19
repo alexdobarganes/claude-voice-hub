@@ -24,7 +24,7 @@ Be aware of what is actually tested before you install this.
 | Platform | Status |
 | --- | --- |
 | Windows | Verified. Developed here and in daily use. |
-| macOS | Partly written, **not verified**. See below. |
+| macOS | Test suite green in CI on Apple silicon; audio runtime unverified. See below. |
 | Linux | Not supported. |
 
 On macOS, `say.py` and `hub.py` are written to run: the native voice maps to
@@ -38,7 +38,10 @@ it simply fails to start on macOS and speech continues unaffected.
 Jumping to a session (`nav.py`) is also Windows-only; on macOS the hub falls
 back to copying a `claude --resume <id>` command to the clipboard.
 
-None of the macOS paths have been executed on a Mac. Reports welcome.
+The test suite runs on `macos-latest` in CI and passes, so imports, the platform
+seam and the parsing logic are exercised on real Apple hardware. What CI cannot
+cover is the part that needs a sound card and a screen: no one has yet heard
+`say.py` speak on a Mac. Reports welcome.
 
 ## Installation
 
@@ -160,9 +163,9 @@ The backend chain is first-available-wins, in this order, overridable with `--ba
 
 This is personal tooling being opened up, not a polished product. Specifically:
 
-- **macOS is unverified and partial.** The speech and hub paths are written but have
-  never been executed on a Mac; the orb overlay and session-jumping are Windows-only.
-  Treat macOS as a work in progress, not a supported platform.
+- **macOS audio is unverified.** CI proves the code imports and the logic holds on
+  Apple silicon, but nobody has actually heard it speak there; the orb overlay and
+  session-jumping remain Windows-only. Treat macOS as a work in progress.
 - **`say.py` is a ~1,600-line monolith.** Every backend, the text preprocessor, the
   preset system and the post-FX chain live in one file. It should be split into a
   `backends/` package with a common interface. Until then, changes there are riskier

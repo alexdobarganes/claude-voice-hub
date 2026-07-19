@@ -1,10 +1,21 @@
-"""Tests for adaptive navigation and its primitives (no focus stealing)."""
+"""Tests for adaptive navigation and its primitives (no focus stealing).
+
+The struct-building and describe() tests run everywhere; the ones that call into
+Win32 are skipped off Windows rather than deleted, so the macOS leg of CI still
+exercises everything it can.
+"""
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import agents_registry
 import nav
+
+windows_only = pytest.mark.skipif(sys.platform != "win32",
+                                  reason="Win32 API; nav.py is Windows-only")
 
 
 def test_build_unicode_inputs_pairs_down_up():
@@ -19,6 +30,7 @@ def test_build_unicode_inputs_handles_accents():
     assert nav._build_unicode_inputs("ñ")[0].ki.wScan == ord("ñ")
 
 
+@windows_only
 def test_clipboard_roundtrip():
     assert nav.set_clipboard("voice hub ñ test") is True
 

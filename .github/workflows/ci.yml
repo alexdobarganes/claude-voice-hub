@@ -10,9 +10,6 @@ jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
-    # macOS has never been verified on real hardware; its failures are expected
-    # and must not block the Windows signal.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:
