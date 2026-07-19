@@ -727,7 +727,8 @@ class _HubReporter:
 ASK_NO_ANSWER = 3
 
 
-def listen_for_answer(hub: "_HubReporter", overlay, args) -> int:
+def listen_for_answer(hub: "_HubReporter", overlay, args,
+                      expect_lang: str | None = None) -> int:
     """Capture a spoken answer and print the transcript to stdout.
 
     That stdout is the return value of the Bash call the agent made, which is
@@ -745,7 +746,8 @@ def listen_for_answer(hub: "_HubReporter", overlay, args) -> int:
     try:
         import stt
         answer = stt.listen_once(timeout=args.ask_timeout,
-                                 silence_tail=args.ask_tail).strip()
+                                 silence_tail=args.ask_tail,
+                                 expect_lang=expect_lang).strip()
     except Exception as e:
         print(f"[ask] no answer: {e}", file=sys.stderr)
         return ASK_NO_ANSWER
@@ -1597,7 +1599,7 @@ def main() -> int:
                                  device=args.device, overlay=overlay):
                 # The turn is still held here, so the mic opens before anyone
                 # else can start talking over the answer.
-                return listen_for_answer(hub, overlay, args) if args.ask else 0
+                return listen_for_answer(hub, overlay, args, lang) if args.ask else 0
             print("[say] stream produced no audio; falling back to synth", file=sys.stderr)
         except Exception as e:
             print(f"[say] stream failed: {e}; falling back to synth", file=sys.stderr)
@@ -1684,7 +1686,7 @@ def main() -> int:
 
             play_audio(final_path, device=args.device, on_start=on_start)
             if args.ask:
-                return listen_for_answer(hub, overlay, args)
+                return listen_for_answer(hub, overlay, args, lang)
         finally:
             overlay.stop()
             speech_turn.release()

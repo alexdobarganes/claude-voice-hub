@@ -84,3 +84,40 @@ def test_the_speaking_visual_is_dismissed_before_the_mic_opens(monkeypatch):
     overlay = _Overlay()
     say.listen_for_answer(_Hub(), overlay, _Args())
     assert overlay.stopped
+
+
+def test_a_reply_in_another_language_is_not_a_reply():
+    """Measured twice with a live mic: a question asked in Spanish came back
+    with fluent, high-confidence English from something else playing in the
+    room. Real audio, real transcription, wrong speaker."""
+    with pytest.raises(stt.SttError):
+        stt.check_answer({"language_code": "eng", "language_probability": 0.97},
+                         expect_lang="es")
+
+
+def test_the_expected_language_passes():
+    stt.check_answer({"language_code": "spa", "language_probability": 0.87},
+                     expect_lang="es")
+
+
+def test_an_unsure_language_call_is_not_used_to_reject():
+    """Short answers ('sí', 'dale') give weak language detection. Rejecting on
+    a coin flip would throw away real answers to save nothing."""
+    stt.check_answer({"language_code": "eng", "language_probability": 0.31},
+                     expect_lang="es")
+
+
+def test_no_expectation_means_no_check():
+    stt.check_answer({"language_code": "eng", "language_probability": 0.99},
+                     expect_lang=None)
+
+
+def test_say_passes_the_question_language_through(monkeypatch, capsys):
+    seen = {}
+
+    def fake(**kw):
+        seen.update(kw)
+        return "dale"
+    monkeypatch.setattr(stt, "listen_once", fake)
+    say.listen_for_answer(_Hub(), _Overlay(), _Args(), "es")
+    assert seen["expect_lang"] == "es"

@@ -373,12 +373,17 @@ def capture_until_silence(timeout: float = 20.0, silence_tail: float = 1.4,
 
 
 def listen_once(timeout: float = 20.0, silence_tail: float = 1.4,
-                device: int | None = None, on_state=None) -> str:
-    """Hands-free capture plus transcription. Raises SttError if unanswered."""
+                device: int | None = None, on_state=None,
+                expect_lang: str | None = None) -> str:
+    """Hands-free capture plus transcription. Raises SttError if unanswered.
+
+    `expect_lang` is the language the question was asked in; a reply in another
+    language is the room, not an answer. See check_answer.
+    """
     wav = capture_until_silence(timeout=timeout, silence_tail=silence_tail,
                                 device=device, on_state=on_state)
     try:
-        return transcribe(wav)
+        return transcribe(wav, expect_lang=expect_lang)
     finally:
         wav.unlink(missing_ok=True)
 
@@ -433,12 +438,45 @@ def strip_sound_events(text: str) -> str:
     return re.sub(r"\[[^\]]*\]", " ", text).strip(" .,;:-\t\n")
 
 
-def transcribe(wav_path: Path) -> str:
+ISO3 = {"es": "spa", "en": "eng"}
+
+
+def check_answer(resp: dict, expect_lang: str | None,
+                 min_lang_probability: float = 0.5) -> None:
+    """Raise SttError if a transcript cannot be the answer we were waiting for.
+
+    An open microphone hears the room, not a person. Measured here, a capture
+    taken with nobody addressing the session returned fluent, high-confidence
+    English while the question had been asked in Spanish -- not a hallucination
+    but real audio from something else playing nearby. No acoustic test
+    separates one voice from another, so the check that remains is whether the
+    transcript is even plausibly a reply: same language as the question.
+
+    This narrows the failure, it does not close it. Someone else speaking
+    Spanish in the room still passes. Treat --ask as something to confirm
+    before acting on, not as proof of consent.
+    """
+    if not expect_lang:
+        return
+    want = ISO3.get(expect_lang, expect_lang)
+    got = str(resp.get("language_code") or "").lower()
+    prob = float(resp.get("language_probability") or 0.0)
+    if got and prob >= min_lang_probability and not got.startswith(want[:3]):
+        raise SttError(
+            f"lo que se oyo no es una respuesta: idioma {got} "
+            f"(confianza {prob:.2f}), la pregunta era en {want}")
+
+
+def transcribe(wav_path: Path, expect_lang: str | None = None) -> str:
     """Speech in the recording. Raises SttError when nothing was actually said."""
     import sys
     raw = ""
     try:
-        raw = str(_scribe_request(wav_path).get("text", "")).strip()
+        resp = _scribe_request(wav_path)
+        check_answer(resp, expect_lang)
+        raw = str(resp.get("text", "")).strip()
+    except SttError:
+        raise
     except Exception as e:
         print(f"[stt] scribe failed: {e}", file=sys.stderr)
 
