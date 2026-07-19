@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-hub"
+version = "0.1.0"
+description = "Give your parallel Claude Code sessions a voice, a queue and a visible speaker."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Alex Dobarganes" }]
+keywords = ["tts", "stt", "claude-code", "voice", "elevenlabs", "edge-tts"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "numpy",
+    "sounddevice",
+    "soundfile",
+    "pydub",          # requires ffmpeg on PATH
+    "Pillow",
+    "edge-tts",
+    "psutil",
+]
+
+[project.optional-dependencies]
+windows = ["uiautomation; sys_platform == 'win32'"]
+macos = ["pyobjc; sys_platform == 'darwin'"]
+# Local neural backends. Heavy downloads: kokoro ~350MB, f5-tts ~1.3GB.
+local = ["kokoro", "f5-tts"]
+# Only needed by experiments/orb_gpu.py.
+gpu = ["torch"]
+dev = ["pytest"]
+
+# Flat layout: the project is a set of top-level modules, not a package.
+[tool.setuptools]
+py-modules = [
+    "say",
+    "hub",
+    "hub_events",
+    "stt",
+    "nav",
+    "overlay",
+    "orb_render",
+    "agents_registry",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

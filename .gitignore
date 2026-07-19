@@ -1,0 +1,44 @@
+# --- Secrets and local config -------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Runtime state -------------------------------------------------------
+# Event spool, lockfiles and hub UI state written by say.py / hub.py.
+hub/
+hub_geometry.json
+speak.txt
+*.pid
+*.log
+_*.log
+
+# --- Derived data (do NOT re-add) ----------------------------------------
+# assets/ held reference images and voice-clone seeds derived from personal
+# photos and recordings; *.npy are the particle fields precomputed from those
+# images; *.png are renders and frame dumps produced from them. All three are
+# reproducible from the code, so they stay out of the repo permanently rather
+# than shipping personal source material by accident.
+assets/
+refs/
+*.npy
+*.png
+*.wav
+*.mp3
+
+# --- OS / editor ---------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

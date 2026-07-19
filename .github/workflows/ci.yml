@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    # macOS has never been verified on real hardware; its failures are expected
+    # and must not block the Windows signal.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python-version: ['3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      - name: Install package (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[windows,dev]"
+
+      - name: Install package (macOS)
+        if: runner.os == 'macOS'
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[macos,dev]"
+
+      - name: Check modules import
+        run: python -c "import agents_registry, hub_events, nav, stt, say; print('imports ok')"
+
+      - name: Run tests
+        run: pytest
