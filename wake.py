@@ -93,7 +93,23 @@ def _edit_distance(a: str, b: str, cap: int = 2) -> int:
 
 
 def _is_wake(token: str) -> bool:
-    return token in WAKE_WORDS
+    """Whether a word is the assistant's name, allowing for being misheard.
+
+    Enumerating variants by hand does not converge -- the corpus found "clud"
+    after "club" -- so near misses of a listed variant count too. But the slack
+    has to be length-scaled here even more carefully than for vocatives,
+    because the short variants are the dangerous ones: one edit from "clo"
+    admits "lo", which is among the most common words in Spanish and would wake
+    the assistant constantly.
+
+    So: exact match below five letters, one edit at five or more. Checked
+    against the words that must not pass -- "lo" stays out, and "clave" and
+    "clase" are two edits from every variant, not one.
+    """
+    if token in WAKE_WORDS:
+        return True
+    return any(_edit_distance(token, w, cap=1) <= 1
+               for w in WAKE_WORDS if max(len(token), len(w)) >= 5)
 
 
 def _is_vocative(token: str) -> bool:

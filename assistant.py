@@ -52,6 +52,9 @@ HEARTBEAT_S = 5.0
 # Let the room go quiet after our own audio before trusting the mic again:
 # speakers ring, and a capture opened on the last syllable starts with it.
 SPEAK_SETTLE_S = 0.6
+# How long a message waits for a session to claim it before we fall back to
+# the clipboard. Long enough for a --ask poll, short enough not to feel lost.
+UNCLAIMED_GRACE_S = 8.0
 
 
 def log(msg: str) -> None:
@@ -181,6 +184,40 @@ def handle_utterance(text: str, sessions: list[dict],
     return None   # the room, not us
 
 
+def escalate_unclaimed(grace_s: float = UNCLAIMED_GRACE_S) -> int:
+    """Deliver messages no session came to collect. Returns how many.
+
+    Without this the feature has a dead end in the middle of it: a session
+    sitting in `--ask` claims its answer within a poll, but speaking when
+    nothing is waiting drops the message into a spool with no reader, and it
+    stays there. Alex talks, and nothing happens -- which is the exact
+    complaint the assistant was built to fix, moved one layer down.
+
+    The fallback is the same one nav.py already settled on for dictation: put
+    it on the clipboard and focus the app. Typing blind into the desktop app
+    would land in whichever session happens to be open, which may not be the
+    one meant. So this stops one paste short of hands-free, on purpose.
+    """
+    import nav
+    delivered = 0
+    now = time.time()
+    for msg in inbox.peek():
+        if now - float(msg.get("ts", 0)) < grace_s:
+            continue
+        text = (msg.get("text") or "").strip()
+        target = msg.get("target", inbox.BROADCAST)
+        # Claim it first. If a session takes it between peek and here, the
+        # unlink fails and it is theirs, not ours to deliver twice.
+        claimed = inbox.take(target if target != inbox.BROADCAST else "",
+                             accept_broadcast=True)
+        if not claimed or not text:
+            continue
+        status = nav.deliver_text({"session_id": target, "nav": None}, text)
+        log(f"escalated to clipboard ({status}): {text[:50]!r}")
+        delivered += 1
+    return delivered
+
+
 def _sessions() -> list[dict]:
     """Live sessions as {session_id, name} for routing. Never raises."""
     try:
@@ -223,6 +260,7 @@ def listen_forever(local: "LocalTranscriber | None" = None,
         if IDLE_EXIT_S and now - started > IDLE_EXIT_S:
             log("idle exit")
             return
+        escalate_unclaimed()
 
         # Do not record while the machine is talking. One capture that spanned
         # a spoken instruction and the reply to it came back as a single
@@ -288,7 +326,17 @@ def listen_forever(local: "LocalTranscriber | None" = None,
             return
 
 
-def self_test(phrases: list[str] | None = None) -> int:
+def _synthesize(phrase: str, out: Path) -> bool:
+    import subprocess
+    subprocess.run(
+        [sys.executable, str(THIS_DIR / "say.py"), "--no-play", "--no-hub",
+         "--raw", "--out", str(out), phrase],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return out.exists()
+
+
+def self_test(cases: "list[tuple[str, bool]] | None" = None,
+              verbose: bool = True) -> int:
     """Run synthesized speech through the whole decision path. No mic, no Alex.
 
     Everything except the microphone is exercised: real synthesis, the local
@@ -296,40 +344,51 @@ def self_test(phrases: list[str] | None = None) -> int:
     get right and least amenable to guessing -- what a recognizer actually
     returns for the name -- without needing someone in the room to perform on
     request. Verifying with a person present is still the real test; this is
-    what makes the other ninety percent of the iterations cheap.
+    what makes the other ninety percent of the iterations cheap, and it caught a
+    real bug on its first run.
+
+    The two error kinds are reported separately because they are not equally
+    bad. A MISS costs Alex saying the name again. A FALSE WAKE delivers into a
+    session something he never said to it.
     """
-    import subprocess
     import tempfile
 
-    phrases = phrases or [
-        "Claude, abre el PR",
-        "Oye Claude, para el deploy",
-        "Mira lo que me hice de eso de la palomita",   # the room, not us
-    ]
+    if cases is None:
+        sys.path.insert(0, str(THIS_DIR / "tests"))
+        import wake_corpus
+        cases = wake_corpus.ALL
+
     local = LocalTranscriber()
     local.load()
-    failures = 0
-    for phrase in phrases:
+    misses: list[tuple[str, str]] = []
+    false_wakes: list[tuple[str, str]] = []
+    broken: list[str] = []
+
+    for phrase, expected in cases:
         wav = Path(tempfile.gettempdir()) / f"selftest-{abs(hash(phrase))}.wav"
-        subprocess.run(
-            [sys.executable, str(THIS_DIR / "say.py"), "--no-play", "--no-hub",
-             "--raw", "--out", str(wav), phrase],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        if not wav.exists():
-            print(f"  SYNTH FAILED  {phrase!r}")
-            failures += 1
+        if not _synthesize(phrase, wav):
+            broken.append(phrase)
             continue
         heard = local.transcribe(wav)
         wav.unlink(missing_ok=True)
-        decision = handle_utterance(heard, _sessions(), [])
-        expected = wake.strip_address(phrase) is not None
-        got = decision is not None
-        ok = "ok " if got == expected else "MISS"
-        failures += got != expected
-        print(f"  {ok} said={phrase!r}\n       heard={heard!r}\n"
-              f"       addressed={got} (expected {expected})")
-    print(f"\n{len(phrases) - failures}/{len(phrases)} matched")
-    return 1 if failures else 0
+        got = handle_utterance(heard, _sessions(), []) is not None
+        if got == expected:
+            if verbose:
+                print(f"  ok   {phrase!r}")
+            continue
+        (misses if expected else false_wakes).append((phrase, heard))
+        print(f"  {'MISS' if expected else 'FALSE WAKE'}  said={phrase!r}\n"
+              f"        heard={heard!r}")
+
+    total = len(cases)
+    bad = len(misses) + len(false_wakes) + len(broken)
+    print(f"\n{total - bad}/{total} correct   "
+          f"misses={len(misses)}  false wakes={len(false_wakes)}  "
+          f"synth failures={len(broken)}")
+    if false_wakes:
+        print("False wakes are the serious ones: they put words Alex never "
+              "said into a session.")
+    return 1 if bad else 0
 
 
 def main() -> int:

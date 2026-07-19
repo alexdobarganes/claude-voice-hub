@@ -150,3 +150,24 @@ def test_the_second_mishearing_of_the_same_phrase_also_counts():
 def test_talking_about_it_is_still_not_talking_to_it(said):
     """Pins the words the tolerance must never swallow."""
     assert wake.strip_address(said) is None
+
+
+# --------------------------- near misses of the name ------------------------
+
+def test_a_near_miss_of_a_listed_variant_still_wakes():
+    """The corpus found 'clud' after 'club'. Enumerating by hand does not
+    converge, so near misses of a listed variant count."""
+    assert wake.strip_address("¡Clud! ¿Cómo va eso?") is not None
+
+
+@pytest.mark.parametrize("said", [
+    "lo hago ahora mismo",
+    "la clave está en el env",
+    "la clase esa no compila",
+    "el clon del repo está viejo",
+    "con lo que me dijiste basta",
+])
+def test_common_words_near_the_name_do_not_wake_it(said):
+    """The short variants are the dangerous ones: one edit from 'clo' admits
+    'lo', which would wake the assistant constantly."""
+    assert wake.strip_address(said) is None

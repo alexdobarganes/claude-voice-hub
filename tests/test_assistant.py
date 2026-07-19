@@ -121,3 +121,39 @@ def test_a_hallucinated_transcript_is_never_a_message():
     junk = "ू ॉ, ॑ ॗ ख़ OH ६astics © başall comprehensive"
     assert assistant.handle_utterance(junk, SESSIONS, []) is None
     assert assistant.handle_utterance(junk, SESSIONS, ASKED) is None
+
+
+# --------------------------- unclaimed messages -----------------------------
+
+def test_a_message_nobody_collects_is_escalated(tmp_path, monkeypatch):
+    """Without this the feature has a dead end: speaking when nothing is
+    waiting drops the message into a spool with no reader."""
+    import inbox as ibx
+    import nav
+    monkeypatch.setattr(ibx, "INBOX_DIR", tmp_path / "inbox")
+    sent = []
+    monkeypatch.setattr(nav, "deliver_text",
+                        lambda evt, text: sent.append(text) or "copiado")
+    ibx.put("abre el PR", target=ibx.BROADCAST)
+    assert assistant.escalate_unclaimed(grace_s=0.0) == 1
+    assert sent == ["abre el PR"]
+    assert ibx.peek() == []
+
+
+def test_a_fresh_message_is_left_for_the_session_to_claim(tmp_path, monkeypatch):
+    """A session sitting in --ask must get its own answer, not find it pasted
+    somewhere else."""
+    import inbox as ibx
+    import nav
+    monkeypatch.setattr(ibx, "INBOX_DIR", tmp_path / "inbox")
+    monkeypatch.setattr(nav, "deliver_text",
+                        lambda evt, text: pytest.fail("escalated too early"))
+    ibx.put("abre el PR", target="s1")
+    assert assistant.escalate_unclaimed(grace_s=60.0) == 0
+    assert len(ibx.peek()) == 1
+
+
+def test_escalation_of_an_empty_inbox_does_nothing(tmp_path, monkeypatch):
+    import inbox as ibx
+    monkeypatch.setattr(ibx, "INBOX_DIR", tmp_path / "inbox")
+    assert assistant.escalate_unclaimed(grace_s=0.0) == 0

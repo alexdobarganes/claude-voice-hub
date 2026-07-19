@@ -179,3 +179,46 @@ def test_speech_before_the_capture_does_not_taint_it():
 
 def test_spoke_since_is_false_when_nothing_ever_spoke():
     assert not turn.spoke_since(time.time() - 10)
+
+
+# --------------------------- shelf life -------------------------------------
+
+def test_a_ping_that_waited_too_long_is_not_worth_saying():
+    """'Still refactoring' is a statement about now. Read out forty seconds
+    late, behind three other sessions, it describes a state that has passed."""
+    _holder(pid=4242)                       # someone else is speaking
+    monkey_shelf = dict(turn.SHELF_LIFE_S, ping=0.05)
+    old, turn.SHELF_LIFE_S = turn.SHELF_LIFE_S, monkey_shelf
+    try:
+        t = turn.acquire("ping", timeout=2.0)
+        assert t.expired
+        assert not t.granted
+    finally:
+        turn.SHELF_LIFE_S = old
+
+
+def test_a_blocker_never_expires():
+    """It does not stop mattering because it waited."""
+    assert turn.SHELF_LIFE_S["blocker"] is None
+
+
+def test_a_question_never_expires():
+    """Something is still blocked waiting for the answer."""
+    assert turn.SHELF_LIFE_S["question"] is None
+
+
+def test_a_turn_taken_promptly_is_not_expired():
+    t = turn.acquire("ping", timeout=1.0)
+    assert t.granted and not t.expired
+    t.release()
+
+
+def test_an_expired_turn_never_touches_the_holder():
+    _holder(pid=4242)
+    old, turn.SHELF_LIFE_S = turn.SHELF_LIFE_S, dict(turn.SHELF_LIFE_S, ping=0.05)
+    try:
+        t = turn.acquire("ping", timeout=2.0)
+        t.release()
+        assert json.loads(turn._holder_path().read_text())["pid"] == 4242
+    finally:
+        turn.SHELF_LIFE_S = old

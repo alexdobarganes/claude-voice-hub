@@ -1628,6 +1628,13 @@ def main() -> int:
               file=sys.stderr)
         hub.emit("queued")
         speech_turn = turn.acquire(priority)
+        if speech_turn.expired:
+            # Waited past the point where saying this still helps. The one case
+            # where silence is right rather than a failure: see turn.SHELF_LIFE_S.
+            print(f"[say] dropped: a {priority} that waited too long to matter",
+                  file=sys.stderr)
+            hub.emit("done")
+            return 0
         hub.emit("speaking")
         overlay = _NullOverlay() if args.no_overlay else start_overlay(overlay_label, args.visual)
         try:
@@ -1709,6 +1716,12 @@ def main() -> int:
         analysis = None if args.no_overlay else analyze_audio(final_path)
         hub.emit("queued")
         speech_turn = turn.acquire(priority)
+        if speech_turn.expired:
+            print(f"[say] dropped: a {priority} that waited too long to matter",
+                  file=sys.stderr)
+            overlay.stop()
+            hub.emit("done")
+            return 0
         hub.emit("speaking")
         try:
             def on_start(latency: float) -> None:

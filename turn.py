@@ -46,6 +46,17 @@ HOLDER_NAME = "holder.json"
 PRIORITIES = {"blocker": 0, "question": 1, "outcome": 2, "ping": 3}
 DEFAULT_PRIORITY = "outcome"
 
+# How long an utterance is still worth saying after it was queued. None means
+# forever: a blocker does not stop mattering because it waited, and a question
+# still needs answering.
+#
+# Progress pings are different in kind. "Still refactoring" is a statement about
+# *now*, and read out forty seconds late behind three other sessions it is worse
+# than nothing -- it describes a state that has passed and pushes back everything
+# behind it. So this is the one place where going silent is the correct
+# behaviour rather than a failure.
+SHELF_LIFE_S = {"ping": 40.0, "outcome": 180.0, "question": None, "blocker": None}
+
 HEARTBEAT_S = 5.0
 STALE_S = 30.0          # ~6 missed heartbeats: a real crash, not a slow machine
 POLL_S = 0.15
@@ -67,9 +78,12 @@ class Turn:
     tracking whether it already ran.
     """
 
-    def __init__(self, holder: Path, granted: bool) -> None:
+    def __init__(self, holder: Path, granted: bool, expired: bool = False) -> None:
         self.holder = holder
         self.granted = granted   # False when we gave up waiting and spoke anyway
+        # True when the utterance sat in the queue past its shelf life. The
+        # caller is expected to stay silent: see SHELF_LIFE_S.
+        self.expired = expired
         self._stop = threading.Event()
         self._beat: threading.Thread | None = None
 
@@ -167,9 +181,13 @@ def acquire(priority: str = DEFAULT_PRIORITY, timeout: float = 120.0,
     ticket = QUEUE_DIR / _ticket_name(priority, ts, os.getpid())
     ticket.write_text(payload, encoding="utf-8")
 
+    shelf = SHELF_LIFE_S.get(priority, SHELF_LIFE_S[DEFAULT_PRIORITY])
     deadline = time.monotonic() + timeout
     try:
         while True:
+            if shelf is not None and time.time() - ts > shelf:
+                # Waited past the point where saying this still helps.
+                return Turn(_holder_path(), granted=False, expired=True)
             waiting = _live_tickets(stale)
             if ticket not in waiting:
                 # Our ticket was reclaimed as stale (a machine so loaded the
