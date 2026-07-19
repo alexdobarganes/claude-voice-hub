@@ -70,7 +70,7 @@ def test_delivery_never_types_into_desktop_app(monkeypatch):
     status = nav.deliver_text({"nav": None, "session_id": "s1"}, "hola")
     assert typed == []
     assert copied == ["hola"]
-    assert "copiado" in status
+    assert "copied" in status
 
 
 def test_delivery_reports_clipboard_failure(monkeypatch):

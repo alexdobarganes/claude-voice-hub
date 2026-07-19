@@ -32,15 +32,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Session-jumping (nav.py) drives Windows Terminal through UI Automation.
 windows = ["uiautomation; sys_platform == 'win32'"]
-macos = ["pyobjc; sys_platform == 'darwin'"]
+# macOS needs nothing extra today: the native voice and playback shell out to
+# say(1) and afplay(1). An extra will appear here when the overlay grows a
+# Cocoa window backend.
+macos = []
 # Local neural backends. Heavy downloads: kokoro ~350MB, f5-tts ~1.3GB.
 local = ["kokoro", "f5-tts"]
+# Second link of the fallback chain. Separate from `local` because it is the
+# lightest offline backend and worth installing on its own.
+supertonic = ["supertonic"]
+# Offline transcription fallback for when ElevenLabs Scribe is unavailable.
+stt = ["faster-whisper"]
 # Only needed by experiments/orb_gpu.py.
 gpu = ["torch"]
 dev = ["pytest"]
 
 # Flat layout: the project is a set of top-level modules, not a package.
+# Declaring py-modules disables autodiscovery, so every module has to be listed:
+# a missing name still works under `pip install -e` but vanishes from a real
+# install, which is how it stays broken unnoticed.
 [tool.setuptools]
 py-modules = [
     "say",
@@ -51,6 +63,7 @@ py-modules = [
     "overlay",
     "orb_render",
     "agents_registry",
+    "platform_native",
 ]
 
 [tool.pytest.ini_options]

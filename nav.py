@@ -1,6 +1,6 @@
 """Adaptive navigation to a speaking session.
 
-Priority (see docs/2026-07-18-voice-hub-design.md):
+Priority (see docs/design.md):
   1. Session owns a console/WT window -> foreground it (+ select the WT tab).
   2. Otherwise -> copy `claude --resume <id>` to the clipboard and foreground
      the Claude desktop app. There is no supported API to focus a specific
@@ -12,7 +12,6 @@ never raises.
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes as wintypes
 import time
 
 import agents_registry
@@ -117,9 +116,14 @@ VK_RETURN = 0x0D
 INPUT_KEYBOARD = 1
 
 
+# Spelled with fixed-width ctypes rather than ctypes.wintypes: wintypes only
+# exists on Windows and raises on import elsewhere, which would take the whole
+# module -- and therefore hub.py -- down on macOS before any platform guard could
+# run. c_uint16/c_uint32 are exactly Windows' WORD/DWORD, so the Win32 calls are
+# unchanged; the structs are simply now inert instead of fatal off Windows.
 class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+    _fields_ = [("wVk", ctypes.c_uint16), ("wScan", ctypes.c_uint16),
+                ("dwFlags", ctypes.c_uint32), ("time", ctypes.c_uint32),
                 ("dwExtraInfo", ctypes.c_size_t)]
 
 
@@ -127,7 +131,7 @@ class INPUT(ctypes.Structure):
     class _U(ctypes.Union):
         _fields_ = [("ki", KEYBDINPUT)]
     _anonymous_ = ("u",)
-    _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+    _fields_ = [("type", ctypes.c_uint32), ("u", _U)]
 
 
 def _build_unicode_inputs(text: str) -> list:
@@ -170,10 +174,10 @@ def go_to_session(evt: dict) -> str:
             if nav.get("window_kind") == "wt":
                 try:
                     if _select_wt_tab(hwnd, nav.get("tab_title", "")):
-                        return "ventana + tab"
+                        return "window + tab"
                 except Exception:
                     pass  # UIA failed; the window is focused, good enough
-            return "ventana enfocada"
+            return "window focused"
 
         session_id = evt.get("session_id") or ""
         if not session_id:
@@ -183,8 +187,8 @@ def go_to_session(evt: dict) -> str:
         if app:
             _force_foreground(app)
         if copied:
-            return "resume copiado, pega en la app"
-        return "app enfocada"
+            return "resume command copied, paste it in the app"
+        return "app focused"
     except Exception:
         return ""
 
@@ -216,6 +220,6 @@ def deliver_text(evt: dict, text: str) -> str:
         app = find_claude_app_hwnd()
         if app:
             _force_foreground(app)
-        return "texto copiado, pega en la sesion"
+        return "text copied, paste it in the session"
     except Exception as e:
         return f"fallo la entrega: {type(e).__name__}"

@@ -67,8 +67,9 @@ python -m venv .venv
 .venv/bin/pip install -e ".[macos,dev]"
 ```
 
-Optional extras: `local` pulls the offline neural backends (kokoro ~350MB,
-f5-tts ~1.3GB), `gpu` pulls torch for `experiments/orb_gpu.py`.
+Optional extras: `supertonic` (lightest offline backend), `local` (kokoro ~350MB,
+f5-tts ~1.3GB), `stt` (offline transcription fallback), `gpu` (torch, for
+`experiments/orb_gpu.py`).
 
 **3. Configure a `.env`** in the project root. Everything is optional: with no keys
 at all, `say.py` falls through to a local backend.
@@ -114,8 +115,8 @@ recent history; clicking one performs the best available jump to that session.
 ### Dictation
 
 The hub supports push-to-talk dictation (`stt.py`): it records the default microphone,
-transcribes via ElevenLabs Scribe, and falls back to `faster-whisper` when that package
-is installed. Silence is rejected rather than transcribed, because a hosted model asked
+transcribes via ElevenLabs Scribe, and falls back to `faster-whisper` when installed
+(`pip install -e ".[stt]"`). Silence is rejected rather than transcribed, because a hosted model asked
 to transcribe silence will confidently invent something.
 
 ## Integrating with Claude Code
@@ -147,7 +148,8 @@ while a line is playing.
 The backend chain is first-available-wins, in this order, overridable with `--backend`:
 
 1. **ElevenLabs** — hosted, best quality and dynamics. Used when `ELEVENLABS_API_KEY` is set.
-2. **Supertonic** — local, the free fallback when no key is present.
+2. **Supertonic** — local. Not installed by default: `pip install -e ".[supertonic]"`.
+   Without it the chain falls through to Edge TTS, which is free but needs network.
 3. **Kokoro** — local neural, no network, ~350MB.
 4. **Edge TTS** — Microsoft's free neural cloud voices.
 5. **F5-TTS** — GPU voice cloning against a reference clip, behind `TTS_F5_ENABLED=1`.

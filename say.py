@@ -22,7 +22,7 @@ Quality stack on top of the chosen backend:
 Usage:
     python say.py "Hola mundo"                      # auto-detect lang + backend
     python say.py --lang en --rate 4 "Hi"          # English, faster
-    python say.py --backend sapi "..."             # force backend
+    python say.py --backend native "..."           # force backend
     python say.py --preset excited "Subio NVDA"    # vibe preset
     python say.py --list                           # show backends + voices + devices
     python say.py --list-presets                   # show all presets
@@ -32,7 +32,7 @@ Usage:
     python say.py --seed-ref                       # (re)generate F5 seed ref WAV
 
 Env vars:
-    TTS_BACKEND     force backend (kokoro | edge | f5 | sapi)
+    TTS_BACKEND     force backend (elevenlabs | supertonic | kokoro | edge | f5 | native)
     TTS_RATE        SAPI/edge rate delta, -10..+10 (default 0)
     TTS_DEVICE      output device index for sounddevice
     TTS_VOICE_REF   path to reference WAV for F5-TTS voice cloning
@@ -944,10 +944,14 @@ class KokoroBackend(Backend):
 
     def synth(self, text: str, lang: str, out: Path, *, voice: str | None = None, **kw) -> Path:
         import os
-        os.environ.setdefault("PHONEMIZER_ESPEAK_LIBRARY",
-                              r"C:\Program Files\eSpeak NG\libespeak-ng.dll")
-        os.environ.setdefault("PHONEMIZER_ESPEAK_PATH",
-                              r"C:\Program Files\eSpeak NG\espeak-ng.exe")
+        if platform_native.IS_WINDOWS:
+            # Point phonemizer at the standard installer location. Elsewhere,
+            # leave the environment alone: espeak-ng lands on the library path
+            # and phonemizer finds it on its own.
+            os.environ.setdefault("PHONEMIZER_ESPEAK_LIBRARY",
+                                  r"C:\Program Files\eSpeak NG\libespeak-ng.dll")
+            os.environ.setdefault("PHONEMIZER_ESPEAK_PATH",
+                                  r"C:\Program Files\eSpeak NG\espeak-ng.exe")
         import numpy as np
         import soundfile as sf
         from kokoro import KPipeline

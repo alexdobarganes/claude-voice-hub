@@ -83,8 +83,8 @@ One JSON file per event, named `<ts>-<pid>-<state>.json`:
   "tag": "Billing api, retry logic",
   "preset": "calm",
   "text_head": "first ~80 chars of the utterance",
-  "session_id": "19224582-81fd-4bbe-8ee6-7077e41b7a73",
-  "claude_pid": 336444,
+  "session_id": "00000000-0000-0000-0000-000000000000",
+  "claude_pid": 12345,
   "cwd": "/path/to/example-app",
   "nav": {
     "hwnd": 132456,

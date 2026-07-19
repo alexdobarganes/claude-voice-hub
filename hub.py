@@ -281,9 +281,9 @@ class VoiceHub:
         hint = f"   ·   {self.hotkey_label}" if self.hotkey_label else ""
         if self.recorder is not None:
             target = self._identity(self.stt_target)[0] if self.stt_target else "?"
-            label, fg = f"grabando -> {target}   ·   click para enviar{hint}", ACCENT
+            label, fg = f"recording -> {target}   ·   click to send{hint}", ACCENT
         else:
-            label, fg = f"dictar a la ultima sesion{hint}", SUB
+            label, fg = f"dictate to the last session{hint}", SUB
         # Always clickable: without it, a taken hotkey leaves no way to stop.
         mic = tk.Label(self.frame, text=f"\U0001F3A4  {label}", font=(self.mono, 8),
                        bg=BG, fg=fg, cursor="hand2")
@@ -390,9 +390,9 @@ class VoiceHub:
         VK_SPACE = 0x20
         CANDIDATES = [
             (MOD_CONTROL | MOD_ALT, ord("D"), "Ctrl+Alt+D"),
-            (MOD_CONTROL | MOD_SHIFT, VK_SPACE, "Ctrl+Shift+Espacio"),
+            (MOD_CONTROL | MOD_SHIFT, VK_SPACE, "Ctrl+Shift+Space"),
             (MOD_CONTROL | MOD_ALT, ord("V"), "Ctrl+Alt+V"),
-            (MOD_CONTROL | MOD_ALT, VK_SPACE, "Ctrl+Alt+Espacio"),
+            (MOD_CONTROL | MOD_ALT, VK_SPACE, "Ctrl+Alt+Space"),
         ]
 
         def loop() -> None:
@@ -498,7 +498,7 @@ class VoiceHub:
                 return
             top.destroy()
             if cancelled:
-                self._flash("dictado cancelado")
+                self._flash("dictation cancelled")
                 log("deliver: cancelled by user")
                 return
             status = nav.deliver_text(target, text)

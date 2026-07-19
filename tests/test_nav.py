@@ -30,7 +30,7 @@ def test_go_to_session_prefers_window(monkeypatch):
     status = nav.go_to_session({"nav": {"hwnd": 777, "window_kind": "console"},
                                 "session_id": "s1"})
     assert calls == [777]
-    assert status == "ventana enfocada"
+    assert status == "window focused"
 
 
 def test_go_to_session_selects_wt_tab(monkeypatch):
@@ -38,7 +38,7 @@ def test_go_to_session_selects_wt_tab(monkeypatch):
     monkeypatch.setattr(nav, "_select_wt_tab", lambda h, t: True)
     status = nav.go_to_session({"nav": {"hwnd": 1, "window_kind": "wt",
                                         "tab_title": "example-app"}})
-    assert status == "ventana + tab"
+    assert status == "window + tab"
 
 
 def test_go_to_session_falls_back_to_clipboard(monkeypatch):
@@ -47,7 +47,7 @@ def test_go_to_session_falls_back_to_clipboard(monkeypatch):
     monkeypatch.setattr(nav, "find_claude_app_hwnd", lambda: 0)
     status = nav.go_to_session({"nav": None, "session_id": "abc-123"})
     assert copied == ["claude --resume abc-123"]
-    assert "resume copiado" in status
+    assert "resume command copied" in status
 
 
 def test_go_to_session_without_identity_does_nothing():
