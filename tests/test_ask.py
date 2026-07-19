@@ -34,6 +34,18 @@ class _Args:
     ask_tail = 1.0
 
 
+@pytest.fixture(autouse=True)
+def no_assistant(monkeypatch):
+    """These cases are about the --ask contract, not about who owns the mic.
+
+    Without this they pass or fail depending on whether a real assistant
+    happens to be running on the developer's machine, which is not a property
+    a test should have.
+    """
+    import assistant
+    monkeypatch.setattr(assistant, "is_running", lambda: False)
+
+
 def test_a_captured_answer_goes_to_stdout_with_exit_zero(monkeypatch, capsys):
     monkeypatch.setattr(stt, "listen_once", lambda **kw: "abre PR")
     assert say.listen_for_answer(_Hub(), _Overlay(), _Args()) == 0
@@ -121,3 +133,43 @@ def test_say_passes_the_question_language_through(monkeypatch, capsys):
     monkeypatch.setattr(stt, "listen_once", fake)
     say.listen_for_answer(_Hub(), _Overlay(), _Args(), "es")
     assert seen["expect_lang"] == "es"
+
+
+# --------------------------- who owns the mic -------------------------------
+
+def test_without_the_assistant_we_open_the_mic_ourselves(monkeypatch):
+    """Listening degrades the way speech already does when the hub is missing:
+    worse, but never absent."""
+    import assistant
+    monkeypatch.setattr(assistant, "is_running", lambda: False)
+    monkeypatch.setattr(stt, "listen_once", lambda **kw: "por el micro")
+    assert say._await_answer(_Args(), "es") == "por el micro"
+
+
+def test_with_the_assistant_up_we_wait_on_the_inbox(monkeypatch):
+    """Two processes cannot record from one device sanely."""
+    import assistant, inbox
+    monkeypatch.setattr(assistant, "is_running", lambda: True)
+    monkeypatch.setattr(stt, "listen_once",
+                        lambda **kw: pytest.fail("must not open the mic"))
+    monkeypatch.setattr(inbox, "take", lambda sid, **kw: {"text": "por el inbox"})
+    monkeypatch.setattr(inbox, "open_question", lambda *a, **k: None)
+    monkeypatch.setattr(inbox, "close_question", lambda *a, **k: None)
+    assert say._await_answer(_Args(), "es") == "por el inbox"
+
+
+def test_the_question_is_closed_even_when_nobody_answers(monkeypatch):
+    """A session that gave up must stop claiming answers meant for others."""
+    import assistant, inbox
+    closed = []
+    monkeypatch.setattr(assistant, "is_running", lambda: True)
+    monkeypatch.setattr(inbox, "take", lambda sid, **kw: None)
+    monkeypatch.setattr(inbox, "open_question", lambda *a, **k: None)
+    monkeypatch.setattr(inbox, "close_question", lambda sid: closed.append(sid))
+    monkeypatch.setattr(say, "_INBOX_POLL_S", 0.01)
+
+    class Quick(_Args):
+        ask_timeout = 0.05
+    with pytest.raises(stt.SttError):
+        say._await_answer(Quick(), "es")
+    assert closed

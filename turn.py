@@ -91,6 +91,7 @@ class Turn:
 
     def release(self) -> None:
         self._stop.set()
+        _mark_spoke()
         if not self.granted:
             return
         try:
@@ -197,6 +198,55 @@ def acquire(priority: str = DEFAULT_PRIORITY, timeout: float = 120.0,
         # holder file is what marks us as speaking. Leaving it would make us
         # look like we were still queued behind ourselves.
         ticket.unlink(missing_ok=True)
+
+
+LAST_SPEECH_NAME = "last_speech.json"
+
+
+def _mark_spoke() -> None:
+    """Record when audio last stopped going out. Best-effort, never raises."""
+    try:
+        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+        (QUEUE_DIR / LAST_SPEECH_NAME).write_text(
+            json.dumps({"end": time.time()}), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def last_speech_end() -> float:
+    """When the machine last finished speaking, as an epoch time. 0 if never."""
+    try:
+        return float(json.loads(
+            (QUEUE_DIR / LAST_SPEECH_NAME).read_text(encoding="utf-8"))["end"])
+    except Exception:
+        return 0.0
+
+
+def spoke_since(t: float) -> bool:
+    """True if any audio went out after `t`.
+
+    Checking whether we are speaking *right now* is not enough for a listener
+    that records in long windows: an utterance can start and finish entirely
+    inside one capture, and both the before and after checks then see silence.
+    Observed exactly that way -- a thirty-second capture came back as a verbatim
+    transcript of the machine's own voice.
+    """
+    return last_speech_end() > t or is_speaking()
+
+
+def is_speaking(stale: float = STALE_S) -> bool:
+    """True while some process holds the turn, i.e. audio is going out now.
+
+    The assistant uses this to keep its hands off the microphone while the
+    machine is talking. Without it, one capture contained the tail of a spoken
+    instruction followed by the reply to it, transcribed as a single sentence:
+    the listener heard itself and could not tell its own voice from Alex's.
+    """
+    holder = _holder_path()
+    try:
+        return time.time() - holder.stat().st_mtime <= stale
+    except OSError:
+        return False
 
 
 def pending(stale: float = STALE_S) -> list[dict]:

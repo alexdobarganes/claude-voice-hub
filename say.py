@@ -725,6 +725,45 @@ class _HubReporter:
 # handing the queue to whichever process happened to call os.open first.
 
 ASK_NO_ANSWER = 3
+_INBOX_POLL_S = 0.2
+
+
+def _await_answer(args, expect_lang: str | None) -> str:
+    """Get Alex's spoken answer, from the assistant if it is up, else the mic.
+
+    Two processes cannot record from one device sanely, so whoever owns the
+    microphone decides how this works. When assistant.py is running it owns it:
+    we publish the question and wait for the answer to arrive on the inbox.
+    When it is not, we open the mic ourselves.
+
+    The fallback is the point. Listening degrades the way speech already does
+    when the hub is missing: worse, but never absent.
+    """
+    import stt
+    try:
+        import assistant
+        import inbox
+        assistant_up = assistant.is_running()
+    except Exception:
+        assistant_up = False
+
+    if not assistant_up:
+        return stt.listen_once(timeout=args.ask_timeout,
+                               silence_tail=args.ask_tail,
+                               expect_lang=expect_lang)
+
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    inbox.open_question(session_id, getattr(args, "label", "") or "", "")
+    try:
+        deadline = time.monotonic() + args.ask_timeout
+        while time.monotonic() < deadline:
+            msg = inbox.take(session_id)
+            if msg and msg.get("text", "").strip():
+                return msg["text"]
+            time.sleep(_INBOX_POLL_S)
+        raise stt.SttError("nadie contesto (via asistente)")
+    finally:
+        inbox.close_question(session_id)
 
 
 def listen_for_answer(hub: "_HubReporter", overlay, args,
@@ -744,10 +783,7 @@ def listen_for_answer(hub: "_HubReporter", overlay, args,
     overlay.stop()  # speaking is over; what is live now is the microphone
     hub.emit("listening")
     try:
-        import stt
-        answer = stt.listen_once(timeout=args.ask_timeout,
-                                 silence_tail=args.ask_tail,
-                                 expect_lang=expect_lang).strip()
+        answer = _await_answer(args, expect_lang).strip()
     except Exception as e:
         print(f"[ask] no answer: {e}", file=sys.stderr)
         return ASK_NO_ANSWER

@@ -29,14 +29,19 @@ SILENCE_RMS = 35.0
 _NOT_A_MIC = ("voicemeeter", "cable", "virtual", "stereo mix", "line in",
               "sound mapper", "primary sound", "wave", "aux", "analogue")
 
-# Host APIs to use only as a last resort. Windows exposes the same physical mic
-# through several of them, and WDM-KS is the raw kernel-streaming path: measured
-# here, one webcam mic reads a noise floor of ~834 through WDM-KS and ~22
-# through MME. Since the device is chosen by which one hears most, WDM-KS won
-# every time and took the noise with it -- the calibrated threshold landed at
-# 2501, above ordinary speech, and questions went unanswered while they were
-# being answered. It also rejects blocking reads outright.
-_LAST_RESORT_HOSTS = ("windows wdm-ks",)
+# Host API preference, best first. Windows exposes ONE physical microphone once
+# per host API -- the webcam here appears four times, as MME, DirectSound,
+# WASAPI and WDM-KS -- and they do not behave alike. Measured on that one mic:
+# MME reads a noise floor of ~22, WDM-KS ~834 (and rejects blocking reads
+# outright), while DirectSound returned audio a recognizer turned into
+# 'ू ॉ, ॑ ॗ ख़ OH ६astics © başall'.
+#
+# Choosing purely by which one hears loudest therefore picked a different
+# personality of the same microphone on every run, at random. Ranking the host
+# APIs makes the choice the same every time, and a stable adequate device beats
+# an unstable theoretically-best one: a listener that works only on some starts
+# is not a listener.
+_HOST_PREFERENCE = ("mme", "wasapi", "directsound", "wdm-ks")
 
 
 def _load_dotenv() -> None:
@@ -90,10 +95,12 @@ def pick_input_device(force: bool = False) -> int | None:
     probe the real microphones and take the one that actually hears the room.
     Set TTS_STT_DEVICE to pin a device and skip probing.
 
-    "Hears most" is only a sound rule among comparable devices. Windows exposes
-    one physical mic through several host APIs, and the noisiest of those wins a
-    loudness contest purely by being noisier, not by hearing better. So
-    last-resort host APIs are considered only when nothing else responds.
+    "Hears most" is only a sound rule among comparable devices. The same
+    physical mic appears once per host API and they do not behave alike, so the
+    host API is ranked first and loudness only breaks ties within a rank. That
+    makes the choice identical on every run, which matters more than picking
+    the theoretically best backend: a listener that works only on some starts
+    is not a listener.
 
     The result is cached: probing costs ~0.35s per candidate, and paying that
     on every dictation would swallow the first words spoken after the hotkey.
@@ -104,11 +111,8 @@ def pick_input_device(force: bool = False) -> int | None:
         return int(override)
     if _picked and not force:
         return _picked_device
-    best = _probe_best(preferred=True)
-    if best is None:
-        best = _probe_best(preferred=False)
-    _picked_device, _picked = best, True
-    return best
+    _picked_device, _picked = _best_input(), True
+    return _picked_device
 
 
 def _host_api_name(dev: dict) -> str:
@@ -119,22 +123,36 @@ def _host_api_name(dev: dict) -> str:
         return ""
 
 
-def _probe_best(preferred: bool) -> int | None:
-    """Loudest responding mic, restricted to (or excluding) preferred hosts."""
-    best, best_level = None, 0.0
+def _host_rank(dev: dict) -> int:
+    host = _host_api_name(dev)
+    for rank, key in enumerate(_HOST_PREFERENCE):
+        if key in host:
+            return rank
+    return len(_HOST_PREFERENCE)   # unknown host: after everything named
+
+
+def _best_input() -> int | None:
+    """Best-ranked microphone that responds, loudest breaking ties in a rank."""
+    candidates: list[tuple[int, int]] = []
     for idx, dev in enumerate(_query_devices()):
         if dev.get("max_input_channels", 0) <= 0:
             continue
         name = (dev.get("name") or "").lower()
         if any(bad in name for bad in _NOT_A_MIC):
             continue
-        last_resort = any(h in _host_api_name(dev) for h in _LAST_RESORT_HOSTS)
-        if last_resort == preferred:
-            continue
-        level = _probe_level(idx)
-        if level > best_level:
-            best, best_level = idx, level
-    return best
+        candidates.append((_host_rank(dev), idx))
+
+    for rank in sorted({r for r, _ in candidates}):
+        best, best_level = None, 0.0
+        for r, idx in candidates:
+            if r != rank:
+                continue
+            level = _probe_level(idx)
+            if level > best_level:
+                best, best_level = idx, level
+        if best is not None:
+            return best      # a device in this rank hears something; take it
+    return None
 
 
 def _close_stream(stream) -> None:

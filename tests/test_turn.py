@@ -143,3 +143,39 @@ def test_pending_ignores_the_holder_file():
 
 def test_pending_is_empty_when_nothing_has_queued():
     assert turn.pending() == []
+
+
+def test_is_speaking_reports_a_live_holder():
+    """The assistant keeps its hands off the mic while the machine talks."""
+    _holder(pid=4242)
+    assert turn.is_speaking()
+
+
+def test_is_speaking_is_false_with_nobody_holding():
+    assert not turn.is_speaking()
+
+
+def test_a_crashed_holder_does_not_look_like_speech_forever():
+    _holder(pid=4242, age=turn.STALE_S + 10)
+    assert not turn.is_speaking()
+
+
+def test_an_utterance_entirely_inside_a_capture_is_still_detected():
+    """The failure this exists for: a 30 s capture contained a whole spoken
+    line, so checking 'speaking now' at both ends saw silence both times, and
+    the listener transcribed the machine's own voice."""
+    capture_start = time.time()
+    t = turn.acquire("outcome", timeout=1.0)
+    t.release()                       # spoke and finished, all within the window
+    assert turn.spoke_since(capture_start)
+
+
+def test_speech_before_the_capture_does_not_taint_it():
+    t = turn.acquire("outcome", timeout=1.0)
+    t.release()
+    time.sleep(0.01)
+    assert not turn.spoke_since(time.time())
+
+
+def test_spoke_since_is_false_when_nothing_ever_spoke():
+    assert not turn.spoke_since(time.time() - 10)
