@@ -238,7 +238,10 @@ def listen_forever(local: "LocalTranscriber | None" = None,
                                             device=device)
             log(f"captured {wav.stat().st_size / 32000:.1f}s")
         except stt.SttError:
-            continue          # nobody spoke in that window; go round again
+            # Log it. Silence producing no line at all makes a listener that is
+            # working indistinguishable from one that has wedged.
+            log("nothing said in that window")
+            continue
         except Exception as e:
             log(f"capture failed: {e}")
             time.sleep(1.0)
@@ -285,7 +288,53 @@ def listen_forever(local: "LocalTranscriber | None" = None,
             return
 
 
+def self_test(phrases: list[str] | None = None) -> int:
+    """Run synthesized speech through the whole decision path. No mic, no Alex.
+
+    Everything except the microphone is exercised: real synthesis, the local
+    recognizer, wake matching, routing. That covers the part that was hardest to
+    get right and least amenable to guessing -- what a recognizer actually
+    returns for the name -- without needing someone in the room to perform on
+    request. Verifying with a person present is still the real test; this is
+    what makes the other ninety percent of the iterations cheap.
+    """
+    import subprocess
+    import tempfile
+
+    phrases = phrases or [
+        "Claude, abre el PR",
+        "Oye Claude, para el deploy",
+        "Mira lo que me hice de eso de la palomita",   # the room, not us
+    ]
+    local = LocalTranscriber()
+    local.load()
+    failures = 0
+    for phrase in phrases:
+        wav = Path(tempfile.gettempdir()) / f"selftest-{abs(hash(phrase))}.wav"
+        subprocess.run(
+            [sys.executable, str(THIS_DIR / "say.py"), "--no-play", "--no-hub",
+             "--raw", "--out", str(wav), phrase],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if not wav.exists():
+            print(f"  SYNTH FAILED  {phrase!r}")
+            failures += 1
+            continue
+        heard = local.transcribe(wav)
+        wav.unlink(missing_ok=True)
+        decision = handle_utterance(heard, _sessions(), [])
+        expected = wake.strip_address(phrase) is not None
+        got = decision is not None
+        ok = "ok " if got == expected else "MISS"
+        failures += got != expected
+        print(f"  {ok} said={phrase!r}\n       heard={heard!r}\n"
+              f"       addressed={got} (expected {expected})")
+    print(f"\n{len(phrases) - failures}/{len(phrases)} matched")
+    return 1 if failures else 0
+
+
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     if not _take_lock():
         print("assistant already running", file=sys.stderr)
         return 0

@@ -144,6 +144,47 @@ speech — the session sat there deaf while it was being answered out loud.
 WDM-KS is now a last resort. If `--ask` cannot hear you, check which host API
 you are on before assuming the mic is at fault.
 
+### The assistant (starting the conversation)
+
+`--ask` covers answering. It does not cover *starting*: speak when no session
+happens to be asking and nobody is listening.
+
+```bash
+python assistant.py              # owns the mic, listens for its name
+python assistant.py --self-test  # verify the whole path without a mic
+```
+
+Say **"Claude, ..."** and what follows is delivered to a session. Name a session
+and it goes there specifically ("Claude, billing api, abre el PR"). While a
+session has a question open, you can answer without the name, because answering
+a question you were just asked is how conversation works.
+
+It is the single owner of the microphone: while it runs, `--ask` publishes its
+question and waits on the inbox instead of opening the device. Without it,
+`--ask` opens the mic itself, so listening degrades the way speech already does
+when the hub is absent.
+
+**What it ignores, and why each guard exists.** Every one of these was added
+after a live failure, not in anticipation of one:
+
+| Guard | The failure it came from |
+| --- | --- |
+| Must be addressed | A capture with nobody talking to it returned correctly transcribed Spanish that was simply not for us |
+| Discards its own audio | A 30 s capture came back as a verbatim transcript of the machine's own voice |
+| Whisper's VAD, then a script check | Given room hum, the local model returns confident nonsense: `'ჲლლლბგეი...'` |
+| Local pass before the hosted one | Sending every voice in the room to a paid API to learn it was the television |
+
+The wake list holds what a recognizer *actually returns* for "Claude" spoken in
+Spanish — including `club` — rather than how the name is spelled, and address
+forms are matched with a length-scaled edit tolerance because "Oye Claude" came
+back as "Oje Claude" and then as "Ojeh, Claude". Grow that list from what you
+observe, not from what should happen; `--self-test` is there to make observing
+cheap.
+
+**It cannot tell one voice from another.** Someone else in the room saying
+"Claude" reaches your sessions. Treat what arrives as something to confirm
+before acting on, not as proof of consent.
+
 ### Priority
 
 Utterances are ranked, not merely queued:

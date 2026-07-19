@@ -121,3 +121,32 @@ def test_a_stray_symbol_does_not_disqualify_a_real_sentence():
 def test_the_variant_a_recognizer_actually_returned():
     """Observed verbatim: 'Claude' spoken in Spanish came back as 'club'."""
     assert wake.strip_address("club, abre el PR") == "abre el pr"
+
+
+def test_a_misheard_vocative_still_counts_as_an_address():
+    """From the self-test: 'Oye Claude, para el deploy' came back as
+    'Oje Claude! Parallde ploi!'. 'oje' is not 'oye', and a perfectly good
+    address was being thrown away over one letter."""
+    assert wake.strip_address("Oje Claude! Parallde ploi!") is not None
+
+
+def test_an_ordinary_word_before_the_name_is_still_not_an_address():
+    """The slack must not be so wide that talking about it becomes talking
+    to it."""
+    assert wake.strip_address("creo que Claude ya lo hizo") is None
+
+
+def test_the_second_mishearing_of_the_same_phrase_also_counts():
+    """Same sentence, two runs, two spellings: 'Oje Claude!' and 'Ojeh, Claude.'
+    Tolerance has to scale with word length to cover both."""
+    assert wake.strip_address("Ojeh, Claude. Parallel deploy.") is not None
+
+
+@pytest.mark.parametrize("said", [
+    "creo que Claude ya lo hizo",
+    "que Claude lo revise",
+    "dile a Claude que pare",
+])
+def test_talking_about_it_is_still_not_talking_to_it(said):
+    """Pins the words the tolerance must never swallow."""
+    assert wake.strip_address(said) is None

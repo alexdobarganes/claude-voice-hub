@@ -76,8 +76,48 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _edit_distance(a: str, b: str, cap: int = 2) -> int:
+    """Levenshtein distance, stopping once it exceeds `cap`."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1,
+                           prev[j - 1] + (ca != cb)))
+        if min(cur) > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
 def _is_wake(token: str) -> bool:
     return token in WAKE_WORDS
+
+
+def _is_vocative(token: str) -> bool:
+    """Whether a word before the name is an address form, allowing for misheard.
+
+    Exact matching was too brittle here, and the self-test caught it twice:
+    "Oye Claude, para el deploy" came back first as "Oje Claude!" and then as
+    "Ojeh, Claude.", so a perfectly good address was thrown away over one or two
+    letters.
+
+    The slack has to scale with length rather than be a constant. Two edits is
+    nothing across "ojeh" and "oye", but across "eh" it is the whole word, and
+    a flat tolerance of two would make half the language a way of calling
+    someone. So: one edit for short forms, two once a word is long enough for
+    two edits to still mean something.
+
+    Checked against the words that must NOT pass -- "creo", "que" -- which stay
+    three or more edits from every vocative at any tolerance used here.
+    """
+    for v in _VOCATIVES:
+        allowed = 2 if max(len(token), len(v)) >= 4 else 1
+        if _edit_distance(token, v, cap=allowed) <= allowed:
+            return True
+    return False
 
 
 def strip_address(text: str) -> str | None:
@@ -93,12 +133,12 @@ def strip_address(text: str) -> str | None:
         if _is_wake(w):
             # Everything before the name must be an address form, or this was a
             # mention inside a sentence rather than someone calling us.
-            if any(p not in _VOCATIVES for p in words[:i]):
+            if any(not _is_vocative(p) for p in words[:i]):
                 return None
             rest = words[i + 1:]
             # A trailing vocative comma ("Claude, ...") leaves nothing to strip,
             # but a leading filler after the name is noise: "claude eh, haz X".
-            while rest and rest[0] in _VOCATIVES:
+            while rest and _is_vocative(rest[0]):
                 rest = rest[1:]
             return " ".join(rest)
     return None
