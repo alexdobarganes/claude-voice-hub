@@ -302,10 +302,13 @@ This is personal tooling being opened up, not a polished product. Specifically:
   preset system and the post-FX chain live in one file. It should be split into a
   `backends/` package with a common interface. Until then, changes there are riskier
   than they should be.
-- **Thin test coverage on `say.py` and `overlay.py`.** The suite covers the event
-  spool, navigation, sound events, STT, turn ordering, endpointing and the
-  `--ask` exit-code contract. Synthesis, playback and the renderers are still
-  untested, which is most of `say.py` by volume.
+- **`say.py` is covered where it is pure, not where it is loud.** The suite
+  covers the event spool, navigation, STT, turn ordering, endpointing, wake
+  matching, the inbox, the `--ask` exit-code contract, and `say.py`'s text path
+  and backend selection. Synthesis, playback, post-FX and the renderers are
+  untested: they need audio hardware, a network or a GPU. That is most of
+  `say.py` by volume, and it is the reason the backend split has not happened
+  yet — but the selection logic that split must preserve is now pinned.
 - **`--ask` is tuned against one room.** The endpointer's floor calibration and
   its 0.25 s speech minimum were set from measurements on a single machine with
   a webcam mic. They reject that room reliably; whether they reject yours, or

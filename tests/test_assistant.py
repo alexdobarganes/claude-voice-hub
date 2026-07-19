@@ -15,6 +15,18 @@ SESSIONS = [
     {"session_id": "s1", "name": "billing api"},
     {"session_id": "s2", "name": "voice hub"},
 ]
+
+
+@pytest.fixture(autouse=True)
+def quiet_log(tmp_path, monkeypatch):
+    """Keep the tests out of the real assistant log.
+
+    Without this they append to hub/assistant.log, which is the one place a
+    headless assistant's failures surface -- and a run of the suite fills it
+    with lines from fake backends that never existed. Debugging is hard enough
+    without the log lying about what the machine did.
+    """
+    monkeypatch.setattr(assistant, "LOG", tmp_path / "assistant.log")
 ASKED = [{"session_id": "s2", "tag": "voice hub", "ts": 100.0}]
 
 
