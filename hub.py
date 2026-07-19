@@ -294,8 +294,9 @@ class VoiceHub:
                      bg=BG, fg=ACCENT, padx=px(6)).pack(anchor="w")
         # Resize grip. The window is overrideredirect, so it has no native
         # border to drag — this is the handle.
+        grip_cursor = "size_nw_se" if sys.platform == "win32" else "bottom_right_corner"
         grip = tk.Label(self.frame, text="◢", font=(self.mono, 9),
-                        bg=BG, fg=DIM, cursor="size_nw_se")
+                        bg=BG, fg=DIM, cursor=grip_cursor)
         grip.pack(anchor="e", pady=(px(4), 0))
         grip.bind("<Button-1>", self._size_start)
         grip.bind("<B1-Motion>", self._size_drag)
@@ -383,7 +384,14 @@ class VoiceHub:
         Ctrl+Alt+Space: RegisterHotKey then fails with 1409 and the shortcut
         silently does nothing. So try candidates in order and show the one that
         actually bound, or say 'click' when every candidate is taken.
+
+        RegisterHotKey/GetMessageW are Win32-only; there is no global-hotkey
+        equivalent wired up here yet, so this is a no-op elsewhere (click still
+        works, see the mic label handler in _render).
         """
+        if sys.platform != "win32":
+            self.hotkey_label = ""
+            return
         import ctypes.wintypes
 
         MOD_ALT, MOD_CONTROL, MOD_SHIFT = 0x1, 0x2, 0x4
