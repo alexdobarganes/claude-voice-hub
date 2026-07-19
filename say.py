@@ -1443,11 +1443,24 @@ def pick_backend(force: str | None = None) -> Backend:
 
 # ----------------------------- preset application --------------------------
 
-def resolve_preset(name: str | None) -> Preset:
+def resolve_preset(name: str | None, strict: bool = False) -> Preset:
+    """The named preset, or the default.
+
+    `strict` decides what an unknown name costs, and the two callers differ.
+    A typo in `--preset` is a human at a prompt who can retype it, so failing
+    loudly is right. A typo in a `#preset=` header is inside content that was
+    meant to be spoken, written by an agent that will not see the error -- and
+    exiting there means Alex simply never hears the line. Everything else in
+    this project degrades rather than going silent; a misspelled adverb should
+    not be the one exception.
+    """
     name = (name or DEFAULT_PRESET).lower()
-    if name not in PRESETS:
+    if name in PRESETS:
+        return PRESETS[name]
+    if strict:
         raise SystemExit(f"unknown preset {name!r}; try one of: {', '.join(PRESETS)}")
-    return PRESETS[name]
+    print(f"[say] unknown preset {name!r}; using {DEFAULT_PRESET}", file=sys.stderr)
+    return PRESETS[DEFAULT_PRESET]
 
 
 def apply_rate_delta(base_rate_str: str, delta: int) -> str:
@@ -1611,7 +1624,10 @@ def main() -> int:
     priority = args.priority or ("question" if args.ask else turn.DEFAULT_PRIORITY)
     turn.clear_legacy_lock()
 
-    preset = resolve_preset(args.preset or hdr_preset)
+    # A typo in --preset is a human who can retype it; a typo in a
+    # #preset= header is inside something that was meant to be spoken.
+    preset = (resolve_preset(args.preset, strict=True) if args.preset
+              else resolve_preset(hdr_preset))
     voice = args.voice or (preset.voice_es if lang == "es" else preset.voice_en)
     # rate priority: explicit --edge-rate > preset + delta from --rate
     if args.edge_rate is not None:
