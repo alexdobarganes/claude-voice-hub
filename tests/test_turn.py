@@ -222,3 +222,29 @@ def test_an_expired_turn_never_touches_the_holder():
         assert json.loads(turn._holder_path().read_text())["pid"] == 4242
     finally:
         turn.SHELF_LIFE_S = old
+
+
+def test_the_queue_is_machine_global_not_per_installation(monkeypatch):
+    """What this serializes is the sound card, and there is one of those however
+    many copies of say.py are on the disk. A queue living next to the module
+    would let two installations each believe they had the floor -- exactly what
+    the original temp-dir lock avoided."""
+    import importlib
+    import tempfile as tf
+    monkeypatch.delenv("TTS_TURN_DIR", raising=False)
+    mod = importlib.reload(turn)
+    try:
+        assert str(mod.QUEUE_DIR).startswith(tf.gettempdir())
+    finally:
+        importlib.reload(turn)
+
+
+def test_the_queue_location_can_be_overridden(monkeypatch, tmp_path):
+    import importlib
+    monkeypatch.setenv("TTS_TURN_DIR", str(tmp_path / "q"))
+    mod = importlib.reload(turn)
+    try:
+        assert mod.QUEUE_DIR == tmp_path / "q"
+    finally:
+        monkeypatch.delenv("TTS_TURN_DIR", raising=False)
+        importlib.reload(turn)

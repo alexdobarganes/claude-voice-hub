@@ -38,7 +38,14 @@ import threading
 import time
 from pathlib import Path
 
-QUEUE_DIR = Path(__file__).resolve().parent / "hub" / "queue"
+# Machine-global, not per-installation. What this serializes is the sound card,
+# and there is one of those however many copies of say.py exist on the disk.
+# Keeping the queue next to the module would let two installations each believe
+# they had the floor and talk over each other -- which is precisely the problem
+# the original lock solved by living in the temp dir. Overridable so tests and
+# odd setups are not stuck with a shared path.
+QUEUE_DIR = Path(os.environ.get("TTS_TURN_DIR")
+                 or (Path(tempfile.gettempdir()) / "say-voice-queue"))
 HOLDER_NAME = "holder.json"
 
 # Lower sorts first. These names are the vocabulary the voice skill authors in,
