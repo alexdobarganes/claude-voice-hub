@@ -39,9 +39,15 @@ IS_MACOS = sys.platform == "darwin"
 # genuine coincidence with the Windows path (UpdateLayeredWindow wants the same
 # bytes), and it is why nothing here shuffles channels: any "conversion" would
 # be a bug, not an optimisation.
-_ALPHA_PREMULTIPLIED_FIRST = 2
-_BYTE_ORDER_32_LITTLE = 1 << 12
-_BITMAP_INFO = _ALPHA_PREMULTIPLIED_FIRST | _BYTE_ORDER_32_LITTLE
+#
+# computed in OverlayWindow.push() from the real Quartz constants: a
+# hand-spelled kCGBitmapByteOrder32Little previously drifted to 1<<12, which
+# is actually kCGBitmapByteOrder16Little (real value 2<<12 = 8192). Quartz's
+# CGImageCreate silently accepted the malformed, mismatched bitmapInfo and
+# returned a non-None CGImage -- no exception anywhere -- but the image never
+# composited, which is why the window could render 60fps of "successful"
+# frames and still show nothing. Sourcing the real constants closes off this
+# entire class of bug.
 _RENDERING_INTENT_DEFAULT = 0
 
 # AppKit constants, spelled out because PyObjC does not always export every
@@ -222,13 +228,15 @@ class OverlayWindow:
             cfdata = Foundation.NSData.dataWithBytes_length_(data, len(data))
             provider = Quartz.CGDataProviderCreateWithCFData(cfdata)
             colorspace = Quartz.CGColorSpaceCreateDeviceRGB()
+            bitmap_info = (Quartz.kCGImageAlphaPremultipliedFirst
+                           | Quartz.kCGBitmapByteOrder32Little)
             image = Quartz.CGImageCreate(
                 w, h,
                 8,              # bits per component
                 32,             # bits per pixel
                 w * 4,          # bytes per row: tightly packed, no padding
                 colorspace,
-                _BITMAP_INFO,
+                bitmap_info,
                 provider,
                 None,           # decode array
                 False,          # shouldInterpolate: we render at native size
@@ -338,6 +346,19 @@ def create_overlay_window(x: int, y: int, w: int, h: int,
         # is documented as unreliable, so it goes first.
         app = AppKit.NSApplication.sharedApplication()
         app.setActivationPolicy_(_ACTIVATION_POLICY_ACCESSORY)
+        # finishLaunching is normally called for you by NSApplicationMain /
+        # [NSApp run]; a script that never enters that run loop (we drive our
+        # own pump() instead) may never transition out of "not yet launched",
+        # which can leave every window created before this call permanently
+        # un-composited by the WindowServer even though every API call on it
+        # succeeds with no exception.
+        app.finishLaunching()
+        # A bare `python` process (no .app bundle, no Info.plist) sometimes
+        # never gets a real WindowServer connection from the accessory policy
+        # alone: orderFrontRegardless() then succeeds with no exception but
+        # nothing is ever composited. Explicitly activating forces the
+        # connection; ignoringOtherApps so we still don't steal focus/Dock.
+        app.activateIgnoringOtherApps_(True)
 
         size = screen_size()
         if size is None:

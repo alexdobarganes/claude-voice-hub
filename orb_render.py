@@ -176,12 +176,18 @@ class Orb:
         """One frame -> uint8 [size, size, 4] premultiplied BGRA.
 
         `level` is (low, mid, high) band energies; a bare float is accepted and
-        treated as all three bands at once.
+        treated as all three bands at once. Callers may pass extra trailing
+        channels (e.g. pitch) after the three bands -- only the first three
+        are used here, the rest is ignored rather than broadcast-failing.
 
         The returned array is reused between calls; copy it if you need to keep
         a frame around.
         """
-        bands = np.clip(np.broadcast_to(np.asarray(level, np.float32), (3,)), 0.0, 1.0)
+        arr = np.asarray(level, np.float32)
+        if arr.ndim > 0 and arr.shape[-1] >= 3:
+            bands = np.clip(arr[:3], 0.0, 1.0)
+        else:
+            bands = np.clip(np.broadcast_to(arr, (3,)), 0.0, 1.0)
         lo, mid, hi = float(bands[0]), float(bands[1]), float(bands[2])
         lv = float(bands.max())
         s = self.size
