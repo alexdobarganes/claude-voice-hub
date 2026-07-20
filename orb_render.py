@@ -30,6 +30,8 @@ guessed — a naive version of this same image ran at 20 ms/frame):
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 
 SIZE = 384          # 4K screens: 256 read as a thumbnail, and the post-process
@@ -41,16 +43,32 @@ SIZE = 384          # 4K screens: 256 read as a thumbnail, and the post-process
 # frame rate by 0.3 fps (56.3 -> 56.0), because the cost is pixel-bound (bloom,
 # tonemap, and handing the frame to Windows) rather than point-bound. So use the
 # count that looks right, not the one that seems cheap.
-N_SHELL = 9000      # particles forming the sphere's surface
-N_DUST = 2600       # looser speckle floating just outside it
-GAIN = 1.85         # mesh spreads the same light over many more points, so the
-                    # per-point gain has to come up to keep the old punch
+import os
+
+N_SHELL = int(os.environ.get("TTS_ORB_N_SHELL", 9000))    # particles forming the sphere's surface
+N_DUST = int(os.environ.get("TTS_ORB_N_DUST", 2600))       # looser speckle floating just outside it
+GAIN = float(os.environ.get("TTS_ORB_GAIN", 1.85))         # mesh spreads the same light over many more
+                                                            # points, so the per-point gain has to come
+                                                            # up to keep the old punch
+# How hard the surface pushes outward on the low band, and how much shimmer
+# rides the high band. Raised from the original 0.16/0.055 for a punchier,
+# more liquid-feeling reaction to the voice.
+REACT_LO = float(os.environ.get("TTS_ORB_REACT_LO", 0.38))
+REACT_HI = float(os.environ.get("TTS_ORB_REACT_HI", 0.14))
 
 # Palette in BGR order (see module docstring): blue shell -> magenta shell,
-# cyan lift on the lit/front side.
-C_BLUE = np.array([255, 130, 70], dtype=np.float32) / 255.0
-C_CYAN = np.array([255, 200, 80], dtype=np.float32) / 255.0
-C_MAGENTA = np.array([210, 60, 255], dtype=np.float32) / 255.0
+# cyan lift on the lit/front side. TTS_ORB_C_* overrides ("b,g,r" 0-255) let a
+# caller randomize the look for exploration without touching this file.
+def _bgr(name: str, default: list[float]) -> np.ndarray:
+    v = os.environ.get(name)
+    if not v:
+        return np.array(default, dtype=np.float32) / 255.0
+    b, g, r = (float(x) for x in v.split(","))
+    return np.array([b, g, r], dtype=np.float32) / 255.0
+
+C_BLUE = _bgr("TTS_ORB_C_BLUE", [255, 130, 70])
+C_CYAN = _bgr("TTS_ORB_C_CYAN", [255, 200, 80])
+C_MAGENTA = _bgr("TTS_ORB_C_MAGENTA", [210, 60, 255])
 
 BLOOM_MARGIN = 0.09  # fraction of the canvas kept clear so the glow isn't cut
 _KNEE = 150.0        # tonemap soft-knee point
@@ -88,7 +106,8 @@ def _chan_mean(a: np.ndarray) -> np.ndarray:
 
 
 class Orb:
-    def __init__(self, size: int = SIZE, seed: int = 7,
+    def __init__(self, size: int = SIZE,
+                 seed: int = int(os.environ.get("TTS_ORB_SEED", 7)),
                  n_shell: int = N_SHELL, n_dust: int = N_DUST) -> None:
         self.size = size
         rng = np.random.default_rng(seed)
@@ -122,7 +141,7 @@ class Orb:
 
         self.k = rng.integers(1, 4, n).astype(np.float32)
         self.off = rng.random(n).astype(np.float32)
-        self.amp = (0.05 + 0.11 * rng.random(n)).astype(np.float32)
+        self.amp = (0.08 + 0.18 * rng.random(n)).astype(np.float32)
         # Per-point reactivity: some particles fly out harder than others, so
         # loud moments look like a burst rather than a uniform zoom. Kept small
         # on the mesh, which has to stay a coherent surface.
@@ -134,6 +153,19 @@ class Orb:
         self._flat = np.empty(4 * n, dtype=np.int64)      # 4 bilinear taps
         self._vals = np.empty(4 * n, dtype=np.float32)
         self._out = np.empty((size, size, 4), dtype=np.uint8)
+
+        # Mass-spring-damper state driving the elastic stretch in `_radii`:
+        # a plain multiply-by-loudness (an earlier version of this method)
+        # tracks the input instantly and has no momentum, which reads as
+        # rigid, not elastic -- real soft bodies overshoot past where they're
+        # pushed and settle back, they don't just scale in lockstep with the
+        # force. Lightly underdamped on purpose, for a small natural jiggle
+        # on the settle rather than a dead stop.
+        self._spring_pos = 0.0
+        self._spring_vel = 0.0
+        self._spring_wall: float | None = None
+        self._SPRING_STIFFNESS = 55.0
+        self._SPRING_DAMPING = 6.5
 
         # Fit the sphere to the canvas instead of hoping a hand-picked zoom
         # clears it. Dust sits well outside the mesh (base_r up to ~1.42) and
@@ -148,40 +180,125 @@ class Orb:
         # few stragglers far outside the body, and letting one of them set the
         # scale shrinks the orb to a small disc in a mostly empty canvas. The
         # bloom margin absorbs those few.
-        worst = max(float(np.percentile(np.abs(self._radii(t, 1.0, 1.0)), 99.0))
+        # spring=1.25 rather than the implicit lo=1.0 fallback: the
+        # mass-spring-damper in _step_spring is underdamped on purpose (a
+        # natural jiggle on the settle) and overshoots a sustained target=1.0
+        # by roughly 20%. Fit against that overshoot, not just the target, or
+        # a loud passage clips the halo the instant the spring rebounds past 1.
+        worst = max(float(np.percentile(
+                        np.abs(self._radii(t, 1.0, 1.0, spring=1.25)), 99.0))
                     for t in np.linspace(0.0, 4.0, 24))
         self.zoom = (0.5 - BLOOM_MARGIN) / (worst * (1.0 + 0.06))
 
-    def _radii(self, t: float, lo: float, hi: float) -> np.ndarray:
+    def _life_pulse(self, t: float) -> float:
+        """A slow breath plus a faster, subtler double-beat riding on top of
+        it -- present at all times, including silence, so the orb reads as a
+        living thing at rest rather than something that only moves when
+        spoken to. One clean fast sinusoid (the old 2 Hz pulse) felt
+        mechanical; a slow breath with an irregular heartbeat-like texture on
+        top does not, because nothing about it repeats on a short, obvious
+        period."""
+        breath = np.sin(2 * np.pi * 0.32 * t)
+        heartbeat = (np.sin(2 * np.pi * 1.15 * t)
+                    + 0.5 * np.sin(2 * np.pi * 2.31 * t + 0.6))
+        return 0.06 * breath + 0.02 * heartbeat
+
+    def _blob(self, t: float) -> np.ndarray:
+        """Asymmetric, continuously-writhing lobes -- what makes the silhouette
+        read as a creature rather than a ball. A single fixed standing wave (an
+        earlier version of this file used one) makes a static-looking egg and
+        nothing more; the fix isn't to drop the asymmetry but to keep it always
+        moving: four low-order harmonics of position, each with its own slow,
+        mutually-incommensurate frequency, so lobes grow, recede and migrate
+        around the surface independently and the shape never resettles into a
+        fixed egg or visibly repeats within any short window."""
+        x, y, z = self.x, self.y, self.z
+        h1 = x * y
+        h2 = y * z
+        h3 = z * x
+        h4 = x * x - y * y
+        a1 = np.sin(2 * np.pi * 0.070 * t + 0.0)
+        a2 = np.sin(2 * np.pi * 0.113 * t + 1.7)
+        a3 = np.sin(2 * np.pi * 0.051 * t + 3.4)
+        a4 = np.sin(2 * np.pi * 0.137 * t + 5.1)
+        return 0.16 * (a1 * h1 + a2 * h2 + a3 * h3 + 0.7 * a4 * h4)
+
+    def _step_spring(self, target: float) -> float:
+        """Advance the mass-spring-damper one real time-step toward `target`,
+        return the new position. Uses wall-clock dt (not the caller's `t`,
+        which the overlay slows to 0.35x) so the physics has a consistent
+        real-world feel regardless of that time-dilation."""
+        now = time.monotonic()
+        if self._spring_wall is None:
+            dt = 1.0 / 60.0
+        else:
+            dt = min(0.05, max(0.0, now - self._spring_wall))
+        self._spring_wall = now
+        accel = (self._SPRING_STIFFNESS * (target - self._spring_pos)
+                 - self._SPRING_DAMPING * self._spring_vel)
+        self._spring_vel += accel * dt
+        self._spring_pos += self._spring_vel * dt
+        return self._spring_pos
+
+    def _radii(self, t: float, lo: float, hi: float,
+              spring: float | None = None) -> np.ndarray:
         """Per-point radius at time `t` for the given band levels. Shared by
-        render() and the canvas fit so the two can never disagree."""
-        # A standing wave in x/y/z used to push the radius around, which is what
-        # pulled the sphere into an egg: three sinusoids keyed to position add up
-        # to fat and thin lobes that sit still in space, so the silhouette stops
-        # being round. The breathing below is uniform instead — every point
-        # moves by the same factor, so the shape stays a sphere at every instant
-        # and only its size changes.
+        render() and the canvas fit so the two can never disagree.
+
+        `spring` is the elastic-stretch driver; render() advances the real
+        mass-spring-damper and passes its position here, so the stretch can
+        overshoot past `lo` and settle back like a soft body actually would.
+        The canvas fit calls this without `spring`, which falls back to `lo`
+        directly (a spring driven by a synthetic, non-monotonic `t` sweep
+        during __init__ wouldn't mean anything -- there's no real time to
+        advance it against), padded up so the fit still clears a real
+        overshoot at runtime.
+        """
         r = self.base_r.copy()
+        # Elastic coupling: voice doesn't just puff the surface outward on top
+        # of the blob's existing lobes, it STRETCHES those lobes -- the same
+        # asymmetric bulge that's already there gets pulled further out where
+        # it's already out, and pushed further in where it's already in.
+        # That's what reads as squeezing a soft body rather than inflating a
+        # balloon. `self.react` still gives per-particle variation, so the
+        # stretch isn't perfectly uniform across the surface either.
+        drive = lo if spring is None else spring
+        blob = self._blob(t)
+        r += blob * (1.0 + 2.4 * drive * self.react)
         # Per-particle drift, small and only on the halo, so the surface itself
         # keeps its radius.
         r[self.n_mesh:] += (self.amp
                             * np.sin(2 * np.pi * (self.k * t + self.off)))[self.n_mesh:]
-        r *= 1.0 + 0.045 * np.sin(2 * np.pi * 2.0 * t)
-        r += 0.16 * lo * self.react
+        r *= 1.0 + self._life_pulse(t)
+        # Smaller, faster traveling ripples on top of the blob: `_blob` sets
+        # the large-scale asymmetric shape, this is surface-level liquid
+        # texture -- a phase that sweeps across the surface with `t` instead
+        # of sitting still. Two mismatched frequencies so it never repeats.
+        r += (0.09 * np.sin(3.1 * self.x + 2.3 * self.y + 2.6 * t)) * (1.0 + lo)
+        r += (0.065 * np.sin(4.7 * self.z - 1.9 * self.x + 1.9 * t + 1.3)) * (1.0 + lo)
+        # A small residual direct push keeps quiet/breathy speech visible even
+        # where the blob's own lobes happen to be near zero at that instant.
+        r += 0.5 * REACT_LO * lo * self.react
         if hi > 0.02:
-            r += 0.055 * hi * np.sin(self.shimmer * (12.0 * t) + self.off * 6.283)
+            r += REACT_HI * hi * np.sin(self.shimmer * (12.0 * t) + self.off * 6.283)
         return r
 
     def render(self, t: float, level=0.0, angle: float = 0.0) -> np.ndarray:
         """One frame -> uint8 [size, size, 4] premultiplied BGRA.
 
         `level` is (low, mid, high) band energies; a bare float is accepted and
-        treated as all three bands at once.
+        treated as all three bands at once. Callers may pass extra trailing
+        channels (e.g. pitch) after the three bands -- only the first three
+        are used here, the rest is ignored rather than broadcast-failing.
 
         The returned array is reused between calls; copy it if you need to keep
         a frame around.
         """
-        bands = np.clip(np.broadcast_to(np.asarray(level, np.float32), (3,)), 0.0, 1.0)
+        arr = np.asarray(level, np.float32)
+        if arr.ndim > 0 and arr.shape[-1] >= 3:
+            bands = np.clip(arr[:3], 0.0, 1.0)
+        else:
+            bands = np.clip(np.broadcast_to(arr, (3,)), 0.0, 1.0)
         lo, mid, hi = float(bands[0]), float(bands[1]), float(bands[2])
         lv = float(bands.max())
         s = self.size
@@ -189,7 +306,8 @@ class Orb:
         # Displacement must be a SMOOTH function of position, not per-point
         # noise: neighbouring samples on a wireframe line have to move together
         # or the grid dissolves into speckle. See _radii for the shape of it.
-        r = self._radii(t, lo, hi)
+        spring = self._step_spring(lo)
+        r = self._radii(t, lo, hi, spring=spring)
         X, Y, Z = self.x * r, self.y * r, self.z * r
 
         ca, sa = np.cos(angle), np.sin(angle)
@@ -205,8 +323,21 @@ class Orb:
         zoom = self.zoom * (1.0 + 0.06 * lo)        # whole sphere breathes
         px = (Xr * zoom + 0.5) * s
         py = (Yt * zoom + 0.5) * s
-        depth = (Zt + 1.5) / 3.0
-        bright = (0.30 + 0.95 * depth) ** 1.5 * GAIN * (1.0 + 0.75 * mid)
+        # Clipped to >=0: `bright` below raises (0.30 + 0.95*depth) to a
+        # fractional power, which is only defined for a non-negative base.
+        # The elastic stretch can push a particle's radius (and so Zt) well
+        # outside the range depth was implicitly assumed to stay in before
+        # that stretch existed -- an unclamped negative depth silently
+        # produced NaN pixels here with no warning at the call site, which
+        # then spread through the blur/bloom passes into much larger patches
+        # of corrupted output.
+        depth = np.clip((Zt + 1.5) / 3.0, 0.0, None)
+        # Glow rides the same breath/heartbeat phase as the geometry, so the
+        # orb visibly brightens as it "inhales" instead of only pulsing size:
+        # coordinated motion+light is what makes a pulse read as one living
+        # thing rather than two unrelated animations layered by coincidence.
+        bright = ((0.30 + 0.95 * depth) ** 1.5 * GAIN * (1.0 + 0.75 * mid)
+                 * (1.0 + 0.5 * self._life_pulse(t)))
         rim = np.sqrt(np.clip(Xr * Xr + Yt * Yt, 0, None)) / 1.15
         bright *= 1.0 + (0.9 + 0.7 * hi) * np.clip(rim, 0, 1) ** 3
 

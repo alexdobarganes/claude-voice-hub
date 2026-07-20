@@ -75,8 +75,10 @@ def _make_renderer(kind: str):
 FPS = 60
 # Envelope smoothing as time constants, not per-frame factors, so the motion
 # looks the same at any frame rate. Tuned at 30 fps as 0.55/0.16 per frame.
-ATTACK_TAU = 0.042     # seconds to ~63% toward a louder target
-RELEASE_TAU = 0.191    # slower decay, so tails fall off instead of snapping
+ATTACK_TAU = 0.028     # seconds to ~63% toward a louder target -- fast, so a
+                       # hit reads as an immediate reaction, not a lag
+RELEASE_TAU = 0.26     # slower decay than attack, and slower than before, so
+                       # the fall reads as settling/viscous rather than snappy
 FADE_MS = 260          # fade in/out so it never pops on/off
 # Slightly translucent so it sits *in* the desktop rather than on top of it.
 OPACITY = float(os.environ.get("TTS_OVERLAY_OPACITY", 0.92))
