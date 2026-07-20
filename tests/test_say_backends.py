@@ -17,21 +17,31 @@ import say
 
 
 class _Fake:
-    """Stands in for a Backend without needing anything installed."""
+    """Stands in for a Backend without needing anything installed.
 
-    def __init__(self, name: str, available: bool = True) -> None:
+    `synth_ok=False` makes it fail at synth time the way an expired key or a
+    dropped network does -- installed (available) but unable to speak right now.
+    """
+
+    def __init__(self, name: str, available: bool = True, synth_ok: bool = True) -> None:
         self.name = name
         self._available = available
+        self._synth_ok = synth_ok
+        self.synth_calls = 0
 
     def available(self) -> bool:
         return self._available
 
-    def synth(self, *a, **kw):
-        raise AssertionError("selection tests never synthesize")
+    def synth(self, text, lang, out, **kw):
+        self.synth_calls += 1
+        if not self._synth_ok:
+            raise RuntimeError(f"{self.name} cannot speak right now")
+        return out
 
 
-def _chain(monkeypatch, *pairs):
-    backends = [_Fake(n, ok) for n, ok in pairs]
+def _chain(monkeypatch, *specs):
+    """Each spec is (name, available) or (name, available, synth_ok)."""
+    backends = [_Fake(*spec) for spec in specs]
     monkeypatch.setattr(say, "BACKENDS", backends)
     return backends
 
@@ -59,6 +69,88 @@ def test_no_backend_at_all_is_an_error_not_silence(monkeypatch):
     _chain(monkeypatch, ("elevenlabs", False), ("kokoro", False))
     with pytest.raises(RuntimeError):
         say.pick_backend()
+
+
+# ------------------- degrading when synth fails at runtime -------------------
+#
+# available() answers "is it installed", not "will it speak right now". The
+# runtime failures -- expired key, dropped network, model that won't load --
+# all land after a backend has already been picked.
+
+def test_a_runtime_failure_degrades_one_link_not_all_the_way_down(monkeypatch):
+    """An ElevenLabs 401 should be heard as Kokoro, not as the robotic OS voice."""
+    chain = _chain(monkeypatch, ("elevenlabs", True), ("kokoro", True), ("native", True))
+    assert [b.name for b in say.fallback_chain(chain[0])] == ["kokoro", "native"]
+
+
+def test_degrading_skips_backends_that_are_not_installed(monkeypatch):
+    chain = _chain(monkeypatch, ("elevenlabs", True), ("kokoro", False), ("native", True))
+    assert [b.name for b in say.fallback_chain(chain[0])] == ["native"]
+
+
+def test_degrading_never_retries_the_backend_that_just_failed(monkeypatch):
+    """Re-running the failure would double the wait before Alex hears anything."""
+    chain = _chain(monkeypatch, ("elevenlabs", True), ("kokoro", True))
+    assert chain[0] not in say.fallback_chain(chain[0])
+
+
+def test_the_last_backend_has_nothing_left_to_fall_back_to(monkeypatch):
+    """Nothing below native, so the error must surface rather than loop."""
+    chain = _chain(monkeypatch, ("elevenlabs", True), ("native", True))
+    assert say.fallback_chain(chain[1]) == []
+
+
+# ------------ degrading at synth time: who actually gets to speak ------------
+
+def _out(tmp_path):
+    return tmp_path / "say.wav"
+
+
+def test_a_runtime_failure_hands_off_to_the_next_backend(monkeypatch, tmp_path):
+    """ElevenLabs 401 should be spoken by Kokoro, not dropped to the OS voice."""
+    el, ko, na = _chain(monkeypatch,
+                        ("elevenlabs", True), ("kokoro", True), ("native", True))
+    el._synth_ok = False
+    spoke, _ = say.synth_with_fallback(el, "hi", "en", _out(tmp_path), forced=False)
+    assert spoke is ko
+    assert ko.synth_calls == 1 and na.synth_calls == 0
+
+
+def test_it_keeps_walking_until_one_can_speak(monkeypatch, tmp_path):
+    el, ko, na = _chain(monkeypatch,
+                        ("elevenlabs", True, False), ("kokoro", True, False), ("native", True))
+    spoke, _ = say.synth_with_fallback(el, "hi", "en", _out(tmp_path), forced=False)
+    assert spoke is na
+
+
+def test_a_forced_backend_that_fails_is_never_substituted(monkeypatch, tmp_path):
+    """The regression the reviewer caught: forcing --backend X and having X fail
+    at synth time must raise, not quietly speak in a different voice. Silently
+    speaking the wrong voice is worse than not speaking -- the caller can't tell.
+    """
+    el, ko = _chain(monkeypatch, ("elevenlabs", True), ("kokoro", True))
+    el._synth_ok = False
+    with pytest.raises(RuntimeError):
+        say.synth_with_fallback(el, "hi", "en", _out(tmp_path), forced=True)
+    assert ko.synth_calls == 0   # never reached for another voice
+
+
+def test_when_nothing_downstream_can_speak_the_error_surfaces(monkeypatch, tmp_path):
+    el, na = _chain(monkeypatch, ("elevenlabs", True, False), ("native", True, False))
+    with pytest.raises(RuntimeError):
+        say.synth_with_fallback(el, "hi", "en", _out(tmp_path), forced=False)
+
+
+def test_kokoro_is_the_fallback_for_elevenlabs():
+    """When the key or the network is missing, the next voice heard should be
+    Kokoro -- local, keyless, and closest in character to the hosted one.
+    Supertonic is lighter but flatter, so installing it must not silently
+    demote Kokoro out of the fallback slot.
+    """
+    names = [b.name for b in say.BACKENDS]
+    assert names[0] == "elevenlabs"
+    assert names[1] == "kokoro"
+    assert names.index("kokoro") < names.index("supertonic")
 
 
 def test_the_real_chain_has_a_backend_that_always_works():
