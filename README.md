@@ -126,9 +126,10 @@ to transcribe silence will confidently invent something.
 
 ## Integrating with Claude Code
 
-There is no daemon to install. A Claude Code skill instructs the agent to call `say.py`
-directly via Bash when a spoken line would land faster than text: a finished task, a
-blocker, a question waiting on you.
+There is no daemon to install. The [`voice-hub` skill](.claude/skills/voice-hub/SKILL.md)
+instructs the agent to call `say.py` directly via Bash when a spoken line would land
+faster than text: a finished task, a blocker, a question waiting on you. Claude Code
+picks it up automatically as a project skill for anyone working in this repo.
 
 The convention that makes parallel sessions usable: **every spoken line opens with a
 short tag naming the session or task**, and the written message leads with the same tag.
