@@ -1,10 +1,12 @@
 """Unified TTS tool. Auto-detects best available backend at runtime.
 
 Priority chain:
-  1. Kokoro (local neural, em_alex es / af_heart en) -- best quality, no network, ~350MB
-  2. Edge TTS (Microsoft neural cloud, free)          -- fallback if kokoro missing
-  3. F5-TTS (GPU, neural, voice-clones a ref)         -- if TTS_F5_ENABLED=1
-  4. SAPI via WAV + sounddevice                       -- always available, robotic
+  1. ElevenLabs (hosted, expressive)                  -- if ELEVENLABS_API_KEY is set
+  2. Kokoro (local neural, em_alex es / af_heart en)  -- the fallback: no network, no key, ~350MB
+  3. Supertonic (local, lightest)                     -- if installed
+  4. Edge TTS (Microsoft neural cloud, free)          -- needs network
+  5. F5-TTS (GPU, neural, voice-clones a ref)         -- if TTS_F5_ENABLED=1
+  6. SAPI via WAV + sounddevice                       -- always available, robotic
 
 Single entry point handles language detection, voice selection, rate, output
 device. Replaces having to remember which backend is alive today.
@@ -974,6 +976,39 @@ class Backend:
         raise NotImplementedError
 
 
+SPANISH_VARIANT = os.environ.get("TTS_ES_VARIANT", "es-419")
+
+
+def _spanish_g2p():
+    """Kokoro's Spanish phonemizer, in Latin American Spanish.
+
+    Kokoro maps its 'e' language code to plain espeak `es`, which is peninsular:
+    it cecea, so "voz" comes out /boθ/ and "gracias" /gɾaθjas/. Alex is Latin
+    American and the requested voice is es-MX, so `es-419` (seseo) is the accent
+    that reads as native rather than as a foreigner doing Spain.
+
+    Returns None if no variant loads, leaving Kokoro's default in place: a
+    slightly wrong accent is worth far more than silence.
+
+    `es-419` is espeak-ng's current tag for Latin American Spanish; older builds
+    only shipped `es-la`. Try the configured one first, then that legacy tag,
+    before giving up.
+    """
+    from misaki import espeak
+    variants = [SPANISH_VARIANT]
+    if "es-la" not in variants:
+        variants.append("es-la")   # legacy tag on older espeak-ng builds
+    last_err = None
+    for variant in variants:
+        try:
+            return espeak.EspeakG2P(language=variant)
+        except Exception as e:
+            last_err = e
+    print(f"[kokoro] no Latin American Spanish variant loaded "
+          f"(tried {variants}: {last_err}); using espeak's default", file=sys.stderr)
+    return None
+
+
 class KokoroBackend(Backend):
     name = "kokoro"
     _pipelines: dict = {}  # keyed by lang_code
@@ -1001,7 +1036,10 @@ class KokoroBackend(Backend):
 
         lang_code = "e" if lang == "es" else "a"  # 'e'=Spanish, 'a'=American English
         if lang_code not in self._pipelines:
-            self.__class__._pipelines[lang_code] = KPipeline(lang_code=lang_code)
+            pipeline = KPipeline(lang_code=lang_code)
+            if lang_code == "e":
+                pipeline.g2p = _spanish_g2p() or pipeline.g2p
+            self.__class__._pipelines[lang_code] = pipeline
         pipeline = self._pipelines[lang_code]
 
         # Ignore Edge-style voice names (contain "Neural") — use Kokoro defaults.
@@ -1406,13 +1444,66 @@ def stream_elevenlabs(text: str, *, preset: str = "neutral", voice: str | None =
 
 
 # Order matters: first-available wins unless --backend forces.
-# ElevenLabs first (inspiring voice, dynamics). Supertonic is free fallback when
-# ElevenLabs key is absent. Use --backend supertonic to force local.
-BACKENDS: list[Backend] = [ElevenLabsBackend(), SupertonicBackend(), KokoroBackend(), EdgeBackend(), F5Backend(), NativeBackend()]
+# ElevenLabs first (inspiring voice, dynamics). Kokoro is the designated fallback
+# when the key is absent or the network is not there: it is local, needs no key,
+# and its em_alex/af_heart voices are the closest in character to the hosted one.
+# Supertonic is lighter but flatter, so it sits behind Kokoro rather than ahead.
+BACKENDS: list[Backend] = [ElevenLabsBackend(), KokoroBackend(), SupertonicBackend(), EdgeBackend(), F5Backend(), NativeBackend()]
 
 # The OS voice used to be Windows-only and was called "sapi". Keep the old name
 # working so existing scripts, env vars and muscle memory do not break.
 BACKEND_ALIASES = {"sapi": "native", "say": "native", "os": "native"}
+
+
+def fallback_chain(after: Backend) -> list[Backend]:
+    """The backends still worth trying when `after` fails mid-synthesis.
+
+    `available()` answers "is this installed", which is not the same question as
+    "will this speak right now". A key expires, a network drops, a model refuses
+    to load -- all of it surfaces at synth time, on the backend already chosen.
+    When that happens the next voice should be the next one in the documented
+    order. Jumping straight to the robotic OS voice while Kokoro sits installed
+    one link down is a far bigger drop in quality than an expired key warrants,
+    and Alex hears that drop without being told why.
+    """
+    try:
+        start = BACKENDS.index(after) + 1
+    except ValueError:
+        start = 0
+    return [b for b in BACKENDS[start:] if b.available()]
+
+
+def synth_with_fallback(backend: Backend, text: str, lang: str, out: Path,
+                        *, forced: bool, **synth_kw) -> tuple[Backend, Path]:
+    """Synthesize with `backend`; on a runtime failure, walk the rest of the
+    chain. Returns (backend_that_spoke, output_path).
+
+    `available()` answers "is this installed", not "will this speak right now":
+    an expired key or a dropped network only surfaces here, at synth time. When
+    it does, the next voice heard should be the next one in the documented order
+    rather than a jump straight to the robotic OS voice.
+
+    `forced` is the one exception. When the caller asked for a specific
+    `--backend`, substituting a different voice is worse than failing: they
+    cannot tell it happened. So a forced backend re-raises instead of degrading,
+    the same contract pick_backend() honours at selection time.
+    """
+    # ElevenLabs takes tags natively; everyone else gets them stripped.
+    first_text = text if backend.name == "elevenlabs" else _strip_audio_tags(text)
+    try:
+        return backend, backend.synth(first_text, lang, out, **synth_kw)
+    except Exception as e:
+        if forced:
+            raise
+        last_err = e
+        for alt in fallback_chain(backend):
+            print(f"[say] {backend.name} failed: {last_err} -- falling back to {alt.name}",
+                  file=sys.stderr)
+            try:
+                return alt, alt.synth(_strip_audio_tags(text), lang, out, **synth_kw)
+            except Exception as alt_err:
+                last_err = alt_err
+        raise last_err
 
 
 def pick_backend(force: str | None = None) -> Backend:
@@ -1684,23 +1775,13 @@ def main() -> int:
           f"rate={rate_str} pitch={pitch_str} lang={lang} postfx={not args.no_postfx}",
           file=sys.stderr)
 
-    # Strip audio tags for backends that don't support them natively.
-    synth_text = text if backend.name == "elevenlabs" else _strip_audio_tags(text)
-
-    # Synth -> raw_out (may be .mp3 from Edge, .wav from others).
-    try:
-        raw_out = backend.synth(
-            synth_text, lang, out,
-            voice=voice, rate=rate_str, pitch=pitch_str,
-            ref_wav=args.ref, rate_int=args.rate, preset=preset.name,
-        )
-    except Exception as e:
-        if backend.name != "native" and platform_native.native_tts_available():
-            print(f"[say] {backend.name} failed: {e} -- falling back to the OS voice",
-                  file=sys.stderr)
-            raw_out = NativeBackend().synth(_strip_audio_tags(text), lang, out, rate_int=args.rate)
-        else:
-            raise
+    # Synth -> raw_out (may be .mp3 from Edge, .wav from others). Post-FX keys
+    # off whoever actually spoke, so take back the (possibly substituted) backend.
+    backend, raw_out = synth_with_fallback(
+        backend, text, lang, out, forced=bool(args.backend),
+        voice=voice, rate=rate_str, pitch=pitch_str,
+        ref_wav=args.ref, rate_int=args.rate, preset=preset.name,
+    )
 
     # Post-process. If postfx is disabled or fails, play raw_out directly.
     # Supertonic ships clean already; post-FX (tuned for Kokoro/SAPI) distorts it.

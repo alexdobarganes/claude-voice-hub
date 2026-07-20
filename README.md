@@ -281,9 +281,12 @@ while a line is playing.
 The backend chain is first-available-wins, in this order, overridable with `--backend`:
 
 1. **ElevenLabs** — hosted, best quality and dynamics. Used when `ELEVENLABS_API_KEY` is set.
-2. **Supertonic** — local. Not installed by default: `pip install -e ".[supertonic]"`.
-   Without it the chain falls through to Edge TTS, which is free but needs network.
-3. **Kokoro** — local neural, no network, ~350MB.
+2. **Kokoro** — the fallback for ElevenLabs: local neural, no key, no network, ~350MB.
+   Install with `pip install -e ".[local]"`; also needs eSpeak NG on the box for
+   phonemization (Windows: the standard installer path is picked up automatically).
+   Voices are `em_alex` for Spanish and `af_heart` for English.
+3. **Supertonic** — local and lighter, but flatter. Not installed by default:
+   `pip install -e ".[supertonic]"`.
 4. **Edge TTS** — Microsoft's free neural cloud voices.
 5. **F5-TTS** — GPU voice cloning against a reference clip, behind `TTS_F5_ENABLED=1`.
 6. **Native** — the OS voice: SAPI on Windows, `say(1)` on macOS. Robotic, but
