@@ -55,8 +55,10 @@ dev = ["pytest"]
 
 # Flat layout: the project is a set of top-level modules, not a package.
 # Declaring py-modules disables autodiscovery, so every module has to be listed:
-# a missing name still works under `pip install -e` but vanishes from a real
-# install, which is how it stays broken unnoticed.
+# a missing name vanishes from the install and its imports fail. Under a modern
+# setuptools editable install this is not even a "real install only" trap -- the
+# strict finder only exposes the names listed here, so `import turn` breaks in
+# CI the moment the module is added to the tree but not to this list.
 [tool.setuptools]
 py-modules = [
     "say",
@@ -69,6 +71,10 @@ py-modules = [
     "agents_registry",
     "platform_native",
     "platform_overlay",
+    "assistant",
+    "turn",
+    "inbox",
+    "wake",
 ]
 
 [tool.pytest.ini_options]
