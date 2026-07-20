@@ -100,6 +100,132 @@ python say.py --list-presets
 python say.py --no-play --out clip.wav "Generate a file, do not play it."
 ```
 
+### Asking
+
+`--ask` turns the loudspeaker into a conversation: the session speaks a question,
+listens hands-free, and prints what you said to stdout.
+
+```bash
+python say.py --ask "Billing api: ¿mergeo a main o abro PR?"
+# speaks it, opens the mic, and prints:
+#   abre PR
+```
+
+The agent ran that through Bash, so **your spoken answer arrives as its tool
+output** and it carries on. Answering costs nothing but talking: no tab to find,
+nothing to paste.
+
+Exit codes are the contract, and the case that matters is the second one:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | An answer was captured; it is on stdout |
+| 3 | Nobody answered — timeout, silence, or transcription failed |
+
+There is no third outcome where an unanswered question returns a plausible
+answer. That is not a theoretical concern: the first end-to-end run of this
+returned a fluent English sentence to a question asked in Spanish, in an empty
+room, because a fan and a webcam mic were enough for a hosted model to invent
+one. What rejects it now is that a capture must contain a *consecutive* run of
+speech (0.25 s) above a floor calibrated from the room itself. Counting loud
+blocks cumulatively is not enough: over twenty seconds a noisy room reaches any
+cumulative total.
+
+The mic opens only after an explicit `--ask`, and closes on trailing silence or
+timeout (`--ask-timeout`, `--ask-tail`). If the wrong input gets picked, pin it
+with `TTS_STT_DEVICE`.
+
+One Windows trap is worth knowing about, because it cost the most here and it
+is invisible: the same physical microphone appears once per host API. The C270
+on this machine reads a noise floor of ~22 through MME and ~834 through
+WDM-KS. Since the device was chosen by which one heard most, the noisy driver
+won every time, and the threshold calibrated from it landed above ordinary
+speech — the session sat there deaf while it was being answered out loud.
+WDM-KS is now a last resort. If `--ask` cannot hear you, check which host API
+you are on before assuming the mic is at fault.
+
+### The assistant (starting the conversation)
+
+`--ask` covers answering. It does not cover *starting*: speak when no session
+happens to be asking and nobody is listening.
+
+```bash
+python assistant.py              # owns the mic, listens for its name
+python assistant.py --status     # is it listening? what is queued? what is stuck?
+python assistant.py --self-test  # verify the whole path without a mic
+```
+
+It is not started for you, and that is deliberate: `say.py` auto-launches the
+hub, but a hub is a panel and this is a microphone. Turning one on should be
+something you did, not something that happened.
+
+`--status` exists because the failure mode here is silence, and an assistant
+that is not running looks exactly like one that is running and ignoring you.
+Both are quiet.
+
+Say **"Claude, ..."** and what follows is delivered to a session. Name a session
+and it goes there specifically ("Claude, billing api, abre el PR"). While a
+session has a question open, you can answer without the name, because answering
+a question you were just asked is how conversation works.
+
+It is the single owner of the microphone: while it runs, `--ask` publishes its
+question and waits on the inbox instead of opening the device. Without it,
+`--ask` opens the mic itself, so listening degrades the way speech already does
+when the hub is absent.
+
+**What it ignores, and why each guard exists.** Every one of these was added
+after a live failure, not in anticipation of one:
+
+| Guard | The failure it came from |
+| --- | --- |
+| Must be addressed | A capture with nobody talking to it returned correctly transcribed Spanish that was simply not for us |
+| Discards its own audio | A 30 s capture came back as a verbatim transcript of the machine's own voice |
+| Whisper's VAD, then a script check | Given room hum, the local model returns confident nonsense: `'ჲლლლბგეი...'` |
+| Local pass before the hosted one | Sending every voice in the room to a paid API to learn it was the television |
+
+The wake list holds what a recognizer *actually returns* for "Claude" spoken in
+Spanish — including `club` — rather than how the name is spelled, and address
+forms are matched with a length-scaled edit tolerance because "Oye Claude" came
+back as "Oje Claude" and then as "Ojeh, Claude". Grow that list from what you
+observe, not from what should happen; `--self-test` is there to make observing
+cheap.
+
+**Where what you say ends up.** A session sitting in `--ask` claims its answer
+within a poll. Anything else waits 8 s for a session to collect it and then
+falls back to the clipboard with the app focused — the same conclusion `nav.py`
+already reached for dictation, because typing blind into the desktop app would
+land in whichever session happens to be open. So unprompted speech stops one
+paste short of hands-free, on purpose.
+
+**It cannot tell one voice from another.** Someone else in the room saying
+"Claude" reaches your sessions. Treat what arrives as something to confirm
+before acting on, not as proof of consent.
+
+**Speed.** The local pass runs on the GPU where there is one, falling back
+`cuda/float16 → cuda/int8 → cpu/int8`. The middle step matters more than it
+looks: Pascal cards have no efficient fp16 and reject it outright, and reading
+that rejection as "no usable GPU" cost 4.17 s per utterance instead of 0.44 s,
+for identical output.
+
+### Priority
+
+Utterances are ranked, not merely queued:
+
+```bash
+python say.py --priority blocker "Prod is down."
+python say.py --priority ping "Still refactoring."
+```
+
+`blocker` > `question` > `outcome` > `ping` (default `outcome`; `--ask` implies
+`question`). A blocker overtakes pings that queued before it. Within a band,
+order is exact arrival — the old lock was a spin loop over `O_EXCL`, so among
+several waiters an arbitrary one won and the hub's visible queue could disagree
+with what actually played.
+
+A turn already in progress is never preempted. You cannot un-play audio that is
+already leaving the speaker, so a blocker goes to the front of the queue, not to
+the front of the sound card.
+
 Presets (`neutral`, `excited`, `calm`, `dramatic`, `news`, `brief`) bundle voice, rate
 and pitch so changing the delivery is one flag. Text is preprocessed before synthesis:
 tickers, currency, percentages, large numbers and common abbreviations are rewritten so
@@ -143,7 +269,8 @@ human-readable name and project by wrapping `claude agents --json`.
 
 ## Architecture
 
-`say.py` synthesizes and plays audio, holding a lock so concurrent invocations queue.
+`say.py` synthesizes and plays audio, taking a turn from `turn.py` so concurrent
+invocations queue in rank order rather than overlapping.
 As it works it writes JSON events (queued / speaking / done) to a spool directory that
 `hub.py` tails: the two processes never talk directly, which is why the hub can die,
 restart, or be absent without breaking speech. `hub.py` is a tkinter always-on-top
@@ -154,9 +281,12 @@ while a line is playing.
 The backend chain is first-available-wins, in this order, overridable with `--backend`:
 
 1. **ElevenLabs** — hosted, best quality and dynamics. Used when `ELEVENLABS_API_KEY` is set.
-2. **Supertonic** — local. Not installed by default: `pip install -e ".[supertonic]"`.
-   Without it the chain falls through to Edge TTS, which is free but needs network.
-3. **Kokoro** — local neural, no network, ~350MB.
+2. **Kokoro** — the fallback for ElevenLabs: local neural, no key, no network, ~350MB.
+   Install with `pip install -e ".[local]"`; also needs eSpeak NG on the box for
+   phonemization (Windows: the standard installer path is picked up automatically).
+   Voices are `em_alex` for Spanish and `af_heart` for English.
+3. **Supertonic** — local and lighter, but flatter. Not installed by default:
+   `pip install -e ".[supertonic]"`.
 4. **Edge TTS** — Microsoft's free neural cloud voices.
 5. **F5-TTS** — GPU voice cloning against a reference clip, behind `TTS_F5_ENABLED=1`.
 6. **Native** — the OS voice: SAPI on Windows, `say(1)` on macOS. Robotic, but
@@ -175,8 +305,17 @@ This is personal tooling being opened up, not a polished product. Specifically:
   preset system and the post-FX chain live in one file. It should be split into a
   `backends/` package with a common interface. Until then, changes there are riskier
   than they should be.
-- **No test coverage on `say.py` or `overlay.py`.** The 43 tests cover the event spool,
-  navigation, sound events and STT. The largest and most-used modules are untested.
+- **`say.py` is covered where it is pure, not where it is loud.** The suite
+  covers the event spool, navigation, STT, turn ordering, endpointing, wake
+  matching, the inbox, the `--ask` exit-code contract, and `say.py`'s text path
+  and backend selection. Synthesis, playback, post-FX and the renderers are
+  untested: they need audio hardware, a network or a GPU. That is most of
+  `say.py` by volume, and it is the reason the backend split has not happened
+  yet — but the selection logic that split must preserve is now pinned.
+- **`--ask` is tuned against one room.** The endpointer's floor calibration and
+  its 0.25 s speech minimum were set from measurements on a single machine with
+  a webcam mic. They reject that room reliably; whether they reject yours, or
+  clip your short answers, is unverified.
 - **ffmpeg is a hard system dependency**, not installable via pip.
 - Linux is not supported and nothing has been done to make it work.
 

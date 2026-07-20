@@ -10,6 +10,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -27,6 +28,20 @@ SILENCE_RMS = 35.0
 # loudness contest against the actual microphone.
 _NOT_A_MIC = ("voicemeeter", "cable", "virtual", "stereo mix", "line in",
               "sound mapper", "primary sound", "wave", "aux", "analogue")
+
+# Host API preference, best first. Windows exposes ONE physical microphone once
+# per host API -- the webcam here appears four times, as MME, DirectSound,
+# WASAPI and WDM-KS -- and they do not behave alike. Measured on that one mic:
+# MME reads a noise floor of ~22, WDM-KS ~834 (and rejects blocking reads
+# outright), while DirectSound returned audio a recognizer turned into
+# 'ू ॉ, ॑ ॗ ख़ OH ६astics © başall'.
+#
+# Choosing purely by which one hears loudest therefore picked a different
+# personality of the same microphone on every run, at random. Ranking the host
+# APIs makes the choice the same every time, and a stable adequate device beats
+# an unstable theoretically-best one: a listener that works only on some starts
+# is not a listener.
+_HOST_PREFERENCE = ("mme", "wasapi", "directsound", "wdm-ks")
 
 
 def _load_dotenv() -> None:
@@ -80,6 +95,13 @@ def pick_input_device(force: bool = False) -> int | None:
     probe the real microphones and take the one that actually hears the room.
     Set TTS_STT_DEVICE to pin a device and skip probing.
 
+    "Hears most" is only a sound rule among comparable devices. The same
+    physical mic appears once per host API and they do not behave alike, so the
+    host API is ranked first and loudness only breaks ties within a rank. That
+    makes the choice identical on every run, which matters more than picking
+    the theoretically best backend: a listener that works only on some starts
+    is not a listener.
+
     The result is cached: probing costs ~0.35s per candidate, and paying that
     on every dictation would swallow the first words spoken after the hotkey.
     """
@@ -89,18 +111,48 @@ def pick_input_device(force: bool = False) -> int | None:
         return int(override)
     if _picked and not force:
         return _picked_device
-    best, best_level = None, 0.0
+    _picked_device, _picked = _best_input(), True
+    return _picked_device
+
+
+def _host_api_name(dev: dict) -> str:
+    import sounddevice as sd
+    try:
+        return (sd.query_hostapis()[dev.get("hostapi", -1)]["name"] or "").lower()
+    except Exception:
+        return ""
+
+
+def _host_rank(dev: dict) -> int:
+    host = _host_api_name(dev)
+    for rank, key in enumerate(_HOST_PREFERENCE):
+        if key in host:
+            return rank
+    return len(_HOST_PREFERENCE)   # unknown host: after everything named
+
+
+def _best_input() -> int | None:
+    """Best-ranked microphone that responds, loudest breaking ties in a rank."""
+    candidates: list[tuple[int, int]] = []
     for idx, dev in enumerate(_query_devices()):
         if dev.get("max_input_channels", 0) <= 0:
             continue
         name = (dev.get("name") or "").lower()
         if any(bad in name for bad in _NOT_A_MIC):
             continue
-        level = _probe_level(idx)
-        if level > best_level:
-            best, best_level = idx, level
-    _picked_device, _picked = best, True
-    return best
+        candidates.append((_host_rank(dev), idx))
+
+    for rank in sorted({r for r, _ in candidates}):
+        best, best_level = None, 0.0
+        for r, idx in candidates:
+            if r != rank:
+                continue
+            level = _probe_level(idx)
+            if level > best_level:
+                best, best_level = idx, level
+        if best is not None:
+            return best      # a device in this rank hears something; take it
+    return None
 
 
 def _close_stream(stream) -> None:
@@ -151,6 +203,213 @@ class Recorder:
         return out
 
 
+class Endpointer:
+    """Decides when a hands-free capture is over, from a stream of block levels.
+
+    Push-to-talk has an obvious end: the key comes up. Hands-free has to infer
+    one, and the two ways to get it wrong are not symmetric. Cutting someone off
+    mid-sentence loses the answer; hanging on a little too long costs a pause.
+    So the rule is trailing silence after speech, never a fixed window.
+
+    The speech threshold is calibrated from the room rather than hard-coded.
+    A fixed number cannot work across machines: on this one a dead line input
+    reads ~10 while a live mic in a quiet room reads ~106, so any constant is
+    either deaf in one room or permanently triggered in the other.
+
+    Pure and stepped by `feed()` so it can be tested without a sound card.
+    """
+
+    # Multiple of the measured noise floor that counts as someone talking.
+    # Measured against a webcam mic in this room: the floor is not stationary,
+    # its median wanders between ~300 and ~820 with excursions past 1700. A
+    # tight multiple over a mean would sit inside that wander and call the room
+    # a speaker, so the floor is taken as a high percentile and the margin is
+    # wide.
+    SPEECH_OVER_FLOOR = 3.0
+    FLOOR_PERCENTILE = 0.9
+    FLOOR_FALLBACK = SILENCE_RMS
+
+    # Speech may dip below threshold between syllables; noise does not have to.
+    # Tolerating a short dip keeps a run intact without letting scattered
+    # spikes join up into one.
+    GAP_TOLERANCE_BLOCKS = 2
+
+    def __init__(self, timeout: float = 20.0, silence_tail: float = 1.4,
+                 calibrate_s: float = 0.8, max_total: float = 60.0,
+                 min_speech_s: float = 0.25, block_s: float = 0.05,
+                 settle_s: float = 0.5) -> None:
+        self.timeout = timeout
+        self.silence_tail = silence_tail
+        # Throw the opening away before measuring anything. Two things
+        # contaminate it, and both inflate the floor: the tail of the question
+        # we just spoke still decaying in the room, and the mic's automatic
+        # gain ramping up from cold. Measured here, that window reads a median
+        # of ~718 against a true floor of ~22 -- calibrating on it set a
+        # threshold of 2068, which is above normal speech, so the session sat
+        # there deaf while it was being answered.
+        self.settle_s = settle_s
+        self.calibrate_s = settle_s + calibrate_s
+        self.max_total = max_total
+        # The run has to be *consecutive*. Counting blocks cumulatively was the
+        # bug that let an empty room answer a question: over twenty seconds a
+        # fan and a door clear any cumulative total, and Scribe answers noise
+        # with a fluent sentence rather than admitting it heard nothing. A
+        # sustained run is what actually distinguishes speech from a room.
+        #
+        # 0.25 s is deliberately short. The measured noise excursions here last
+        # about 0.1 s, so a quarter second already separates them, while a
+        # longer requirement would start rejecting real one-word answers. The
+        # cost of rejecting a genuine "sí" is asking again; the cost of
+        # accepting a fan is acting on an answer nobody gave.
+        self.min_blocks = max(1, int(round(min_speech_s / block_s)))
+        self.floor: float | None = None
+        self.threshold = float("inf")
+        self._floor_samples: list[float] = []
+        self._run = 0
+        self._gap = 0
+        self.heard_speech = False
+        self._last_speech = 0.0
+
+    def _calibrate(self) -> None:
+        if self._floor_samples:
+            ordered = sorted(self._floor_samples)
+            idx = min(len(ordered) - 1,
+                      int(len(ordered) * self.FLOOR_PERCENTILE))
+            self.floor = ordered[idx]
+        else:
+            self.floor = self.FLOOR_FALLBACK
+        # A floor of ~0 (muted or dead input) would make any breath count as
+        # speech, so never calibrate below the known-silence level.
+        self.threshold = max(self.floor * self.SPEECH_OVER_FLOOR,
+                             self.FLOOR_FALLBACK)
+
+    def feed(self, rms: float, elapsed: float) -> str:
+        """Return 'calibrating' | 'listening' | 'speech' | 'done' | 'timeout'."""
+        if elapsed < self.settle_s:
+            return "calibrating"   # measured but discarded: see settle_s
+        if elapsed < self.calibrate_s:
+            self._floor_samples.append(rms)
+            return "calibrating"
+        if self.floor is None:
+            self._calibrate()
+
+        if rms >= self.threshold:
+            self._run += 1
+            self._gap = 0
+            self._last_speech = elapsed
+            if self._run >= self.min_blocks:
+                self.heard_speech = True
+        else:
+            self._gap += 1
+            if self._gap > self.GAP_TOLERANCE_BLOCKS:
+                self._run = 0
+
+        if self.heard_speech:
+            if elapsed - self._last_speech >= self.silence_tail:
+                return "done"
+            if elapsed >= self.max_total:
+                return "done"
+            return "speech"
+        if elapsed >= self.timeout:
+            return "timeout"
+        return "listening"
+
+
+BLOCK_S = 0.05
+
+
+def _open_input_stream(device: int | None, callback):
+    """Open the mic. Isolated so tests can stub it, like _scribe_request.
+
+    Callback-driven rather than blocking reads: PortAudio's WDM-KS host API
+    rejects blocking reads outright ('Blocking API not supported yet'), which
+    is the API a webcam mic lands on here. Recorder already takes this path;
+    hands-free capture has no reason to take a different one.
+    """
+    import sounddevice as sd
+    return sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                          blocksize=int(SAMPLE_RATE * BLOCK_S),
+                          callback=callback, device=device)
+
+
+def capture_until_silence(timeout: float = 20.0, silence_tail: float = 1.4,
+                          device: int | None = None,
+                          on_state=None) -> Path:
+    """Record hands-free until the speaker stops. Returns a 16 kHz mono WAV.
+
+    Raises SttError if nobody spoke, which the caller must surface rather than
+    smooth over: a session that asked a question needs to learn it was not
+    answered instead of receiving an invention.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    if device is None:
+        device = pick_input_device()
+    ep = Endpointer(timeout=timeout, silence_tail=silence_tail, block_s=BLOCK_S)
+    blocks: list = []
+    pending: list = []
+
+    def cb(indata, _frames, _time, _status):
+        pending.append(indata.copy())
+
+    stream = _open_input_stream(device, cb)
+    stream.start()
+    started = _now()
+    last_state = ""
+    state = "listening"
+    try:
+        while True:
+            if not pending:
+                time.sleep(BLOCK_S / 2)
+                # Still step the clock, or a mic that delivers nothing at all
+                # would spin here forever instead of timing out.
+                state = ep.feed(0.0, _now() - started)
+            else:
+                while pending:
+                    block = pending.pop(0).reshape(-1)
+                    blocks.append(block)
+                    rms = (float(np.sqrt(np.mean(block.astype("float64") ** 2)))
+                           if block.size else 0.0)
+                    state = ep.feed(rms, _now() - started)
+            if on_state and state != last_state:
+                on_state(state)
+                last_state = state
+            if state in ("done", "timeout"):
+                break
+    finally:
+        _close_stream(stream)
+
+    if not ep.heard_speech:
+        raise SttError(
+            f"nadie contesto (nivel de sala {ep.floor or 0:.0f}, umbral "
+            f"{ep.threshold:.0f}, dispositivo {device}); nada que transcribir")
+    audio = np.concatenate(blocks) if blocks else np.zeros(0, dtype="int16")
+    out = Path(tempfile.gettempdir()) / f"stt-{uuid.uuid4().hex}.wav"
+    sf.write(str(out), audio, SAMPLE_RATE, subtype="PCM_16")
+    return out
+
+
+def listen_once(timeout: float = 20.0, silence_tail: float = 1.4,
+                device: int | None = None, on_state=None,
+                expect_lang: str | None = None) -> str:
+    """Hands-free capture plus transcription. Raises SttError if unanswered.
+
+    `expect_lang` is the language the question was asked in; a reply in another
+    language is the room, not an answer. See check_answer.
+    """
+    wav = capture_until_silence(timeout=timeout, silence_tail=silence_tail,
+                                device=device, on_state=on_state)
+    try:
+        return transcribe(wav, expect_lang=expect_lang)
+    finally:
+        wav.unlink(missing_ok=True)
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
 def _scribe_request(wav_path: Path) -> dict:
     """POST the wav to ElevenLabs Scribe. Isolated so tests can stub it."""
     import urllib.request
@@ -197,12 +456,45 @@ def strip_sound_events(text: str) -> str:
     return re.sub(r"\[[^\]]*\]", " ", text).strip(" .,;:-\t\n")
 
 
-def transcribe(wav_path: Path) -> str:
+ISO3 = {"es": "spa", "en": "eng"}
+
+
+def check_answer(resp: dict, expect_lang: str | None,
+                 min_lang_probability: float = 0.5) -> None:
+    """Raise SttError if a transcript cannot be the answer we were waiting for.
+
+    An open microphone hears the room, not a person. Measured here, a capture
+    taken with nobody addressing the session returned fluent, high-confidence
+    English while the question had been asked in Spanish -- not a hallucination
+    but real audio from something else playing nearby. No acoustic test
+    separates one voice from another, so the check that remains is whether the
+    transcript is even plausibly a reply: same language as the question.
+
+    This narrows the failure, it does not close it. Someone else speaking
+    Spanish in the room still passes. Treat --ask as something to confirm
+    before acting on, not as proof of consent.
+    """
+    if not expect_lang:
+        return
+    want = ISO3.get(expect_lang, expect_lang)
+    got = str(resp.get("language_code") or "").lower()
+    prob = float(resp.get("language_probability") or 0.0)
+    if got and prob >= min_lang_probability and not got.startswith(want[:3]):
+        raise SttError(
+            f"lo que se oyo no es una respuesta: idioma {got} "
+            f"(confianza {prob:.2f}), la pregunta era en {want}")
+
+
+def transcribe(wav_path: Path, expect_lang: str | None = None) -> str:
     """Speech in the recording. Raises SttError when nothing was actually said."""
     import sys
     raw = ""
     try:
-        raw = str(_scribe_request(wav_path).get("text", "")).strip()
+        resp = _scribe_request(wav_path)
+        check_answer(resp, expect_lang)
+        raw = str(resp.get("text", "")).strip()
+    except SttError:
+        raise
     except Exception as e:
         print(f"[stt] scribe failed: {e}", file=sys.stderr)
 

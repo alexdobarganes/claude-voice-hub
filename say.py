@@ -1,10 +1,12 @@
 """Unified TTS tool. Auto-detects best available backend at runtime.
 
 Priority chain:
-  1. Kokoro (local neural, em_alex es / af_heart en) -- best quality, no network, ~350MB
-  2. Edge TTS (Microsoft neural cloud, free)          -- fallback if kokoro missing
-  3. F5-TTS (GPU, neural, voice-clones a ref)         -- if TTS_F5_ENABLED=1
-  4. SAPI via WAV + sounddevice                       -- always available, robotic
+  1. ElevenLabs (hosted, expressive)                  -- if ELEVENLABS_API_KEY is set
+  2. Kokoro (local neural, em_alex es / af_heart en)  -- the fallback: no network, no key, ~350MB
+  3. Supertonic (local, lightest)                     -- if installed
+  4. Edge TTS (Microsoft neural cloud, free)          -- needs network
+  5. F5-TTS (GPU, neural, voice-clones a ref)         -- if TTS_F5_ENABLED=1
+  6. SAPI via WAV + sounddevice                       -- always available, robotic
 
 Single entry point handles language detection, voice selection, rate, output
 device. Replaces having to remember which backend is alive today.
@@ -53,6 +55,7 @@ from pathlib import Path
 from typing import Callable
 
 import platform_native
+import turn
 
 warnings.filterwarnings("ignore")
 
@@ -719,44 +722,86 @@ class _HubReporter:
 
 # ----------------------------- helpers -------------------------------------
 
-def acquire_speech_lock(timeout: float = 120.0, stale: float = 180.0) -> Callable[[], None]:
-    """Serialize playback across concurrent say.py processes.
+# ----------------------------- asking --------------------------------------
+# Playback serialization now lives in turn.py, which ranks utterances instead of
+# handing the queue to whichever process happened to call os.open first.
 
-    Multiple Claude sessions can speak at the same time; without this their
-    audio overlaps into noise. A lock file in the temp dir makes playback
-    first-come-first-served: later callers wait until the current utterance
-    finishes, so voices queue instead of talking over each other.
+ASK_NO_ANSWER = 3
+_INBOX_POLL_S = 0.2
 
-    Never blocks forever and never goes silent: a lock older than `stale`
-    seconds is treated as a crashed process and removed; on `timeout` we
-    proceed without the lock. Returns a release() callable.
+
+def _await_answer(args, expect_lang: str | None) -> str:
+    """Get Alex's spoken answer, from the assistant if it is up, else the mic.
+
+    Two processes cannot record from one device sanely, so whoever owns the
+    microphone decides how this works. When assistant.py is running it owns it:
+    we publish the question and wait for the answer to arrive on the inbox.
+    When it is not, we open the mic ourselves.
+
+    The fallback is the point. Listening degrades the way speech already does
+    when the hub is missing: worse, but never absent.
     """
-    lock_path = Path(tempfile.gettempdir()) / "say-voice.lock"
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
+    import stt
+    try:
+        import assistant
+        import inbox
+        assistant_up = assistant.is_running()
+    except Exception:
+        assistant_up = False
 
-            def release() -> None:
-                try:
-                    lock_path.unlink()
-                except OSError:
-                    pass
+    if not assistant_up:
+        return stt.listen_once(timeout=args.ask_timeout,
+                               silence_tail=args.ask_tail,
+                               expect_lang=expect_lang)
 
-            return release
-        except FileExistsError:
-            try:
-                if time.time() - lock_path.stat().st_mtime > stale:
-                    lock_path.unlink()
-                    continue
-            except OSError:
-                continue  # holder just released; retry immediately
-            if time.monotonic() >= deadline:
-                print("[lock] timeout waiting for speech lock; playing anyway", file=sys.stderr)
-                return lambda: None
-            time.sleep(0.3)
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    inbox.open_question(session_id, getattr(args, "label", "") or "", "")
+    try:
+        deadline = time.monotonic() + args.ask_timeout
+        while time.monotonic() < deadline:
+            msg = inbox.take(session_id)
+            if msg and msg.get("text", "").strip():
+                return msg["text"]
+            time.sleep(_INBOX_POLL_S)
+        raise stt.SttError("nadie contesto (via asistente)")
+    finally:
+        inbox.close_question(session_id)
+
+
+def listen_for_answer(hub: "_HubReporter", overlay, args,
+                      expect_lang: str | None = None) -> int:
+    """Capture a spoken answer and print the transcript to stdout.
+
+    That stdout is the return value of the Bash call the agent made, which is
+    the entire point of --ask: the answer comes back as tool output and the
+    session continues without anyone walking to a keyboard.
+
+    The caller still holds its turn while this runs, so no other session can
+    start talking over the answer. Returns an exit code: 0 with a transcript on
+    stdout, ASK_NO_ANSWER if nobody answered. Silence is never smoothed over
+    into a plausible answer — a session that asked needs to learn it was not
+    answered, and Scribe will happily invent a caption for an empty room.
+    """
+    overlay.stop()  # speaking is over; what is live now is the microphone
+    hub.emit("listening")
+    try:
+        answer = _await_answer(args, expect_lang).strip()
+    except Exception as e:
+        print(f"[ask] no answer: {e}", file=sys.stderr)
+        return ASK_NO_ANSWER
+    if not answer:
+        print("[ask] no answer: empty transcript", file=sys.stderr)
+        return ASK_NO_ANSWER
+    # Force UTF-8 on the way out. Windows hands stdout a cp1252 codec by
+    # default, which turned a real answer into 'mant?n ... olv?date': the
+    # agent would act on a mangled version of what was actually said, and
+    # Spanish answers carry accents in almost every sentence.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    print(answer)
+    return 0
 
 
 def parse_headers(text: str) -> tuple[str, str | None, str | None]:
@@ -931,6 +976,39 @@ class Backend:
         raise NotImplementedError
 
 
+SPANISH_VARIANT = os.environ.get("TTS_ES_VARIANT", "es-419")
+
+
+def _spanish_g2p():
+    """Kokoro's Spanish phonemizer, in Latin American Spanish.
+
+    Kokoro maps its 'e' language code to plain espeak `es`, which is peninsular:
+    it cecea, so "voz" comes out /boθ/ and "gracias" /gɾaθjas/. Alex is Latin
+    American and the requested voice is es-MX, so `es-419` (seseo) is the accent
+    that reads as native rather than as a foreigner doing Spain.
+
+    Returns None if no variant loads, leaving Kokoro's default in place: a
+    slightly wrong accent is worth far more than silence.
+
+    `es-419` is espeak-ng's current tag for Latin American Spanish; older builds
+    only shipped `es-la`. Try the configured one first, then that legacy tag,
+    before giving up.
+    """
+    from misaki import espeak
+    variants = [SPANISH_VARIANT]
+    if "es-la" not in variants:
+        variants.append("es-la")   # legacy tag on older espeak-ng builds
+    last_err = None
+    for variant in variants:
+        try:
+            return espeak.EspeakG2P(language=variant)
+        except Exception as e:
+            last_err = e
+    print(f"[kokoro] no Latin American Spanish variant loaded "
+          f"(tried {variants}: {last_err}); using espeak's default", file=sys.stderr)
+    return None
+
+
 class KokoroBackend(Backend):
     name = "kokoro"
     _pipelines: dict = {}  # keyed by lang_code
@@ -958,7 +1036,10 @@ class KokoroBackend(Backend):
 
         lang_code = "e" if lang == "es" else "a"  # 'e'=Spanish, 'a'=American English
         if lang_code not in self._pipelines:
-            self.__class__._pipelines[lang_code] = KPipeline(lang_code=lang_code)
+            pipeline = KPipeline(lang_code=lang_code)
+            if lang_code == "e":
+                pipeline.g2p = _spanish_g2p() or pipeline.g2p
+            self.__class__._pipelines[lang_code] = pipeline
         pipeline = self._pipelines[lang_code]
 
         # Ignore Edge-style voice names (contain "Neural") — use Kokoro defaults.
@@ -1363,13 +1444,66 @@ def stream_elevenlabs(text: str, *, preset: str = "neutral", voice: str | None =
 
 
 # Order matters: first-available wins unless --backend forces.
-# ElevenLabs first (inspiring voice, dynamics). Supertonic is free fallback when
-# ElevenLabs key is absent. Use --backend supertonic to force local.
-BACKENDS: list[Backend] = [ElevenLabsBackend(), SupertonicBackend(), KokoroBackend(), EdgeBackend(), F5Backend(), NativeBackend()]
+# ElevenLabs first (inspiring voice, dynamics). Kokoro is the designated fallback
+# when the key is absent or the network is not there: it is local, needs no key,
+# and its em_alex/af_heart voices are the closest in character to the hosted one.
+# Supertonic is lighter but flatter, so it sits behind Kokoro rather than ahead.
+BACKENDS: list[Backend] = [ElevenLabsBackend(), KokoroBackend(), SupertonicBackend(), EdgeBackend(), F5Backend(), NativeBackend()]
 
 # The OS voice used to be Windows-only and was called "sapi". Keep the old name
 # working so existing scripts, env vars and muscle memory do not break.
 BACKEND_ALIASES = {"sapi": "native", "say": "native", "os": "native"}
+
+
+def fallback_chain(after: Backend) -> list[Backend]:
+    """The backends still worth trying when `after` fails mid-synthesis.
+
+    `available()` answers "is this installed", which is not the same question as
+    "will this speak right now". A key expires, a network drops, a model refuses
+    to load -- all of it surfaces at synth time, on the backend already chosen.
+    When that happens the next voice should be the next one in the documented
+    order. Jumping straight to the robotic OS voice while Kokoro sits installed
+    one link down is a far bigger drop in quality than an expired key warrants,
+    and Alex hears that drop without being told why.
+    """
+    try:
+        start = BACKENDS.index(after) + 1
+    except ValueError:
+        start = 0
+    return [b for b in BACKENDS[start:] if b.available()]
+
+
+def synth_with_fallback(backend: Backend, text: str, lang: str, out: Path,
+                        *, forced: bool, **synth_kw) -> tuple[Backend, Path]:
+    """Synthesize with `backend`; on a runtime failure, walk the rest of the
+    chain. Returns (backend_that_spoke, output_path).
+
+    `available()` answers "is this installed", not "will this speak right now":
+    an expired key or a dropped network only surfaces here, at synth time. When
+    it does, the next voice heard should be the next one in the documented order
+    rather than a jump straight to the robotic OS voice.
+
+    `forced` is the one exception. When the caller asked for a specific
+    `--backend`, substituting a different voice is worse than failing: they
+    cannot tell it happened. So a forced backend re-raises instead of degrading,
+    the same contract pick_backend() honours at selection time.
+    """
+    # ElevenLabs takes tags natively; everyone else gets them stripped.
+    first_text = text if backend.name == "elevenlabs" else _strip_audio_tags(text)
+    try:
+        return backend, backend.synth(first_text, lang, out, **synth_kw)
+    except Exception as e:
+        if forced:
+            raise
+        last_err = e
+        for alt in fallback_chain(backend):
+            print(f"[say] {backend.name} failed: {last_err} -- falling back to {alt.name}",
+                  file=sys.stderr)
+            try:
+                return alt, alt.synth(_strip_audio_tags(text), lang, out, **synth_kw)
+            except Exception as alt_err:
+                last_err = alt_err
+        raise last_err
 
 
 def pick_backend(force: str | None = None) -> Backend:
@@ -1400,11 +1534,24 @@ def pick_backend(force: str | None = None) -> Backend:
 
 # ----------------------------- preset application --------------------------
 
-def resolve_preset(name: str | None) -> Preset:
+def resolve_preset(name: str | None, strict: bool = False) -> Preset:
+    """The named preset, or the default.
+
+    `strict` decides what an unknown name costs, and the two callers differ.
+    A typo in `--preset` is a human at a prompt who can retype it, so failing
+    loudly is right. A typo in a `#preset=` header is inside content that was
+    meant to be spoken, written by an agent that will not see the error -- and
+    exiting there means Alex simply never hears the line. Everything else in
+    this project degrades rather than going silent; a misspelled adverb should
+    not be the one exception.
+    """
     name = (name or DEFAULT_PRESET).lower()
-    if name not in PRESETS:
+    if name in PRESETS:
+        return PRESETS[name]
+    if strict:
         raise SystemExit(f"unknown preset {name!r}; try one of: {', '.join(PRESETS)}")
-    return PRESETS[name]
+    print(f"[say] unknown preset {name!r}; using {DEFAULT_PRESET}", file=sys.stderr)
+    return PRESETS[DEFAULT_PRESET]
 
 
 def apply_rate_delta(base_rate_str: str, delta: int) -> str:
@@ -1495,7 +1642,30 @@ def main() -> int:
                         "Also settable with TTS_VOICE_VISUAL")
     p.add_argument("--no-overlay", action="store_true",
                    help="don't show the on-screen speaking indicator")
+    # --ask turns the loudspeaker into a conversation: speak a question, listen
+    # hands-free, and print the transcript to stdout. The agent that ran this
+    # through Bash receives the spoken answer as its tool output and carries on,
+    # so answering no longer costs a trip to the keyboard.
+    p.add_argument("--ask", action="store_true",
+                   help="after speaking, listen for a spoken answer and print the "
+                        "transcript to stdout (exit 3 if nobody answered)")
+    p.add_argument("--ask-timeout", type=float, default=20.0,
+                   help="seconds to wait for an answer to begin (default 20)")
+    p.add_argument("--ask-tail", type=float, default=1.4,
+                   help="seconds of silence that end the answer (default 1.4)")
+    p.add_argument("--priority", default=None,
+                   choices=tuple(turn.PRIORITIES),
+                   help="how far this utterance jumps the queue: blocker > "
+                        "question > outcome > ping. --ask implies question")
     args = p.parse_args()
+
+    # Without playback we never reach the listening step, so --ask would exit 0
+    # having asked nobody anything. Failing loudly beats an agent believing it
+    # got an answer it never waited for.
+    if args.ask and args.no_play:
+        print("--ask needs playback: it speaks a question and then listens",
+              file=sys.stderr)
+        return 1
 
     if args.seed_ref:
         out = seed_jorge_ref()
@@ -1540,7 +1710,15 @@ def main() -> int:
                        overlay_label, args.preset or hdr_preset or DEFAULT_PRESET,
                        raw_text)
 
-    preset = resolve_preset(args.preset or hdr_preset)
+    # A question outranks a plain outcome by default: it is the one kind of
+    # utterance that leaves a session blocked until it is answered.
+    priority = args.priority or ("question" if args.ask else turn.DEFAULT_PRIORITY)
+    turn.clear_legacy_lock()
+
+    # A typo in --preset is a human who can retype it; a typo in a
+    # #preset= header is inside something that was meant to be spoken.
+    preset = (resolve_preset(args.preset, strict=True) if args.preset
+              else resolve_preset(hdr_preset))
     voice = args.voice or (preset.voice_es if lang == "es" else preset.voice_en)
     # rate priority: explicit --edge-rate > preset + delta from --rate
     if args.edge_rate is not None:
@@ -1556,19 +1734,28 @@ def main() -> int:
         print(f"[say] streaming via elevenlabs preset={preset.name} voice={voice} lang={lang}",
               file=sys.stderr)
         hub.emit("queued")
-        release = acquire_speech_lock()
+        speech_turn = turn.acquire(priority)
+        if speech_turn.expired:
+            # Waited past the point where saying this still helps. The one case
+            # where silence is right rather than a failure: see turn.SHELF_LIFE_S.
+            print(f"[say] dropped: a {priority} that waited too long to matter",
+                  file=sys.stderr)
+            hub.emit("done")
+            return 0
         hub.emit("speaking")
         overlay = _NullOverlay() if args.no_overlay else start_overlay(overlay_label, args.visual)
         try:
             if stream_elevenlabs(text, preset=preset.name, voice=args.voice,
                                  device=args.device, overlay=overlay):
-                return 0
+                # The turn is still held here, so the mic opens before anyone
+                # else can start talking over the answer.
+                return listen_for_answer(hub, overlay, args, lang) if args.ask else 0
             print("[say] stream produced no audio; falling back to synth", file=sys.stderr)
         except Exception as e:
             print(f"[say] stream failed: {e}; falling back to synth", file=sys.stderr)
         finally:
             overlay.stop()
-            release()
+            speech_turn.release()
             hub.emit("done")
 
     # Start the visual BEFORE synthesizing. It stays invisible until the first
@@ -1588,23 +1775,13 @@ def main() -> int:
           f"rate={rate_str} pitch={pitch_str} lang={lang} postfx={not args.no_postfx}",
           file=sys.stderr)
 
-    # Strip audio tags for backends that don't support them natively.
-    synth_text = text if backend.name == "elevenlabs" else _strip_audio_tags(text)
-
-    # Synth -> raw_out (may be .mp3 from Edge, .wav from others).
-    try:
-        raw_out = backend.synth(
-            synth_text, lang, out,
-            voice=voice, rate=rate_str, pitch=pitch_str,
-            ref_wav=args.ref, rate_int=args.rate, preset=preset.name,
-        )
-    except Exception as e:
-        if backend.name != "native" and platform_native.native_tts_available():
-            print(f"[say] {backend.name} failed: {e} -- falling back to the OS voice",
-                  file=sys.stderr)
-            raw_out = NativeBackend().synth(_strip_audio_tags(text), lang, out, rate_int=args.rate)
-        else:
-            raise
+    # Synth -> raw_out (may be .mp3 from Edge, .wav from others). Post-FX keys
+    # off whoever actually spoke, so take back the (possibly substituted) backend.
+    backend, raw_out = synth_with_fallback(
+        backend, text, lang, out, forced=bool(args.backend),
+        voice=voice, rate=rate_str, pitch=pitch_str,
+        ref_wav=args.ref, rate_int=args.rate, preset=preset.name,
+    )
 
     # Post-process. If postfx is disabled or fails, play raw_out directly.
     # Supertonic ships clean already; post-FX (tuned for Kokoro/SAPI) distorts it.
@@ -1635,7 +1812,13 @@ def main() -> int:
         # stalling the queue while we crunch numbers.
         analysis = None if args.no_overlay else analyze_audio(final_path)
         hub.emit("queued")
-        release = acquire_speech_lock()
+        speech_turn = turn.acquire(priority)
+        if speech_turn.expired:
+            print(f"[say] dropped: a {priority} that waited too long to matter",
+                  file=sys.stderr)
+            overlay.stop()
+            hub.emit("done")
+            return 0
         hub.emit("speaking")
         try:
             def on_start(latency: float) -> None:
@@ -1648,9 +1831,11 @@ def main() -> int:
                 overlay.send_words(getattr(backend, "words", None), delay=latency)
 
             play_audio(final_path, device=args.device, on_start=on_start)
+            if args.ask:
+                return listen_for_answer(hub, overlay, args, lang)
         finally:
             overlay.stop()
-            release()
+            speech_turn.release()
             hub.emit("done")
     return 0
 

@@ -175,6 +175,11 @@ class VoiceHub:
             if self.current and self._key(self.current) != key:
                 self.history.appendleft((self.current, time.time()))
             self.current = evt
+        elif state == "listening":
+            # The session finished asking and is now waiting on a spoken answer.
+            # It still holds its turn, so it stays in the hero row: what matters
+            # is that you can see WHO is waiting on you, and go there.
+            self.current = evt
         elif state == "done":
             if self.current and self._key(self.current) == key:
                 self.history.appendleft((self.current, time.time()))
@@ -223,10 +228,17 @@ class VoiceHub:
 
     def _hero(self, evt: dict) -> None:
         headline, sub = self._identity(evt)
+        # A session waiting on a spoken answer is not the same as one talking at
+        # you: it is blocked until you say something. The mic glyph is the
+        # difference between "someone is talking" and "someone needs you".
+        waiting = evt.get("state") == "listening"
         row = tk.Frame(self.frame, bg=BG)
         row.pack(anchor="w", fill="x")
-        icon = tk.Label(row, text="\U0001F50A", font=("Segoe UI Emoji", 13), bg=BG, fg=ACCENT)
+        icon = tk.Label(row, text="\U0001F3A4" if waiting else "\U0001F50A",
+                        font=("Segoe UI Emoji", 13), bg=BG, fg=ACCENT)
         icon.pack(side="left")
+        if waiting:
+            sub = "esperando tu respuesta"
         col = tk.Frame(row, bg=BG)
         col.pack(side="left", padx=px(8))
         top = tk.Label(col, text=headline, font=(self.mono, 11, "bold"), bg=BG, fg=ACCENT)
@@ -505,6 +517,10 @@ class VoiceHub:
             if not top.winfo_exists():
                 return
             top.destroy()
+            # Reset the target either way. It is chosen per dictation, and a
+            # target left stuck here would silently send the next answer to a
+            # session that is no longer the one asking.
+            self.stt_target = None
             if cancelled:
                 self._flash("dictation cancelled")
                 log("deliver: cancelled by user")
